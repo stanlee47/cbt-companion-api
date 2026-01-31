@@ -119,7 +119,29 @@ class Database:
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
         """)
-        
+
+        # Wearable sensor data
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS wearable_data (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                ppg REAL NOT NULL,
+                gsr REAL NOT NULL,
+                acc_x REAL NOT NULL,
+                acc_y REAL NOT NULL,
+                acc_z REAL NOT NULL,
+                device_timestamp TEXT,
+                recorded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+
+        # Create index for faster queries on wearable data
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_wearable_user_time
+            ON wearable_data(user_id, recorded_at DESC)
+        """)
+
         self.conn.commit()
     
     # ==================== USER OPERATIONS ====================
@@ -430,6 +452,414 @@ class Database:
             (new_streak, today, json.dumps(distortion_counts), user_id)
         )
         self.conn.commit()
+
+    # ==================== WEARABLE DATA OPERATIONS ====================
+
+    def save_wearable_data(self, user_id: str, ppg: float, gsr: float,
+                           acc_x: float, acc_y: float, acc_z: float,
+                           device_timestamp: str = None) -> str:
+        """Save wearable sensor data."""
+        record_id = str(uuid.uuid4())
+
+        self.conn.execute(
+            """INSERT INTO wearable_data
+               (id, user_id, ppg, gsr, acc_x, acc_y, acc_z, device_timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (record_id, user_id, ppg, gsr, acc_x, acc_y, acc_z, device_timestamp)
+        )
+        self.conn.commit()
+
+        return record_id
+
+    def get_latest_wearable_data(self, user_id: str) -> dict:
+        """Get the most recent wearable data for a user."""
+        result = self.conn.execute(
+            """SELECT id, ppg, gsr, acc_x, acc_y, acc_z, device_timestamp, recorded_at
+               FROM wearable_data WHERE user_id = ?
+               ORDER BY recorded_at DESC LIMIT 1""",
+            (user_id,)
+        ).fetchone()
+
+        if result:
+            return {
+                "id": result[0],
+                "ppg": result[1],
+                "gsr": result[2],
+                "acc_x": result[3],
+                "acc_y": result[4],
+                "acc_z": result[5],
+                "device_timestamp": result[6],
+                "recorded_at": result[7]
+            }
+        return None
+
+    def get_wearable_history(self, user_id: str, limit: int = 100,
+                             offset: int = 0, start_date: str = None,
+                             end_date: str = None) -> list:
+        """Get wearable data history for a user."""
+        query = """SELECT id, ppg, gsr, acc_x, acc_y, acc_z, device_timestamp, recorded_at
+                   FROM wearable_data WHERE user_id = ?"""
+        params = [user_id]
+
+        if start_date:
+            query += " AND recorded_at >= ?"
+            params.append(start_date)
+
+        if end_date:
+            query += " AND recorded_at <= ?"
+            params.append(end_date)
+
+        query += " ORDER BY recorded_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        results = self.conn.execute(query, tuple(params)).fetchall()
+
+        return [
+            {
+                "id": r[0],
+                "ppg": r[1],
+                "gsr": r[2],
+                "acc_x": r[3],
+                "acc_y": r[4],
+                "acc_z": r[5],
+                "device_timestamp": r[6],
+                "recorded_at": r[7]
+            }
+            for r in results
+        ]
+
+    def get_wearable_stats(self, user_id: str, period: str = "day") -> dict:
+        """Get aggregated statistics for wearable data."""
+        # Calculate date filter based on period
+        if period == "day":
+            date_filter = "datetime('now', '-1 day')"
+        elif period == "week":
+            date_filter = "datetime('now', '-7 days')"
+        else:  # month
+            date_filter = "datetime('now', '-30 days')"
+
+        result = self.conn.execute(
+            f"""SELECT
+                COUNT(*) as count,
+                AVG(ppg) as avg_ppg,
+                MIN(ppg) as min_ppg,
+                MAX(ppg) as max_ppg,
+                AVG(gsr) as avg_gsr,
+                MIN(gsr) as min_gsr,
+                MAX(gsr) as max_gsr,
+                AVG(acc_x) as avg_acc_x,
+                AVG(acc_y) as avg_acc_y,
+                AVG(acc_z) as avg_acc_z
+               FROM wearable_data
+               WHERE user_id = ? AND recorded_at >= {date_filter}""",
+            (user_id,)
+        ).fetchone()
+
+        if result and result[0] > 0:
+            return {
+                "reading_count": result[0],
+                "ppg": {
+                    "avg": round(result[1], 2) if result[1] else None,
+                    "min": round(result[2], 2) if result[2] else None,
+                    "max": round(result[3], 2) if result[3] else None
+                },
+                "gsr": {
+                    "avg": round(result[4], 4) if result[4] else None,
+                    "min": round(result[5], 4) if result[5] else None,
+                    "max": round(result[6], 4) if result[6] else None
+                },
+                "accelerometer": {
+                    "avg_x": round(result[7], 4) if result[7] else None,
+                    "avg_y": round(result[8], 4) if result[8] else None,
+                    "avg_z": round(result[9], 4) if result[9] else None
+                }
+            }
+
+        return {
+            "reading_count": 0,
+            "ppg": {"avg": None, "min": None, "max": None},
+            "gsr": {"avg": None, "min": None, "max": None},
+            "accelerometer": {"avg_x": None, "avg_y": None, "avg_z": None}
+        }
+
+    # ==================== ADMIN OPERATIONS ====================
+
+    def get_all_users(self) -> list:
+        """Get all users with basic info for admin panel."""
+        results = self.conn.execute(
+            """SELECT u.id, u.email, u.name, u.context, u.created_at,
+                      s.total_sessions, s.total_exercises, s.current_streak, s.last_session_date
+               FROM users u
+               LEFT JOIN user_stats s ON u.id = s.user_id
+               ORDER BY u.created_at DESC"""
+        ).fetchall()
+
+        users = []
+        for r in results:
+            # Count crisis flags for this user
+            flag_count = self.conn.execute(
+                "SELECT COUNT(*) FROM crisis_flags WHERE user_id = ? AND reviewed = 0",
+                (r[0],)
+            ).fetchone()[0]
+
+            users.append({
+                "id": r[0],
+                "email": r[1],
+                "name": r[2],
+                "context": r[3],
+                "created_at": r[4],
+                "total_sessions": r[5] or 0,
+                "total_exercises": r[6] or 0,
+                "current_streak": r[7] or 0,
+                "last_session_date": r[8],
+                "unreviewed_alerts": flag_count
+            })
+
+        return users
+
+    def get_user_full_details(self, user_id: str) -> dict:
+        """Get complete user data for admin patient detail view."""
+        user = self.get_user_by_id(user_id)
+        if not user:
+            return None
+
+        # Get user stats
+        stats = self.get_user_stats(user_id)
+
+        # Get created_at
+        created_at = self.conn.execute(
+            "SELECT created_at FROM users WHERE id = ?",
+            (user_id,)
+        ).fetchone()
+
+        # Get sessions
+        sessions = self.get_user_sessions(user_id, limit=50)
+
+        # Get crisis history
+        crisis_flags = self.conn.execute(
+            """SELECT id, session_id, message_content, trigger_word, flagged_at, reviewed
+               FROM crisis_flags WHERE user_id = ?
+               ORDER BY flagged_at DESC""",
+            (user_id,)
+        ).fetchall()
+
+        crisis_history = [
+            {
+                "id": r[0],
+                "session_id": r[1],
+                "message_content": r[2],
+                "trigger_word": r[3],
+                "flagged_at": r[4],
+                "reviewed": bool(r[5])
+            }
+            for r in crisis_flags
+        ]
+
+        # Get latest wearable data
+        latest_wearable = self.get_latest_wearable_data(user_id)
+
+        return {
+            **user,
+            "created_at": created_at[0] if created_at else None,
+            "stats": stats,
+            "sessions": sessions,
+            "crisis_history": crisis_history,
+            "latest_wearable": latest_wearable
+        }
+
+    def get_all_crisis_flags(self, reviewed: bool = None) -> list:
+        """Get all crisis flags, optionally filtered by reviewed status."""
+        query = """SELECT cf.id, cf.user_id, cf.user_name, cf.user_email,
+                          cf.session_id, cf.message_content, cf.trigger_word,
+                          cf.flagged_at, cf.reviewed
+                   FROM crisis_flags cf
+                   ORDER BY cf.flagged_at DESC"""
+
+        if reviewed is not None:
+            query = """SELECT cf.id, cf.user_id, cf.user_name, cf.user_email,
+                              cf.session_id, cf.message_content, cf.trigger_word,
+                              cf.flagged_at, cf.reviewed
+                       FROM crisis_flags cf
+                       WHERE cf.reviewed = ?
+                       ORDER BY cf.flagged_at DESC"""
+            results = self.conn.execute(query, (1 if reviewed else 0,)).fetchall()
+        else:
+            results = self.conn.execute(query).fetchall()
+
+        return [
+            {
+                "id": r[0],
+                "user_id": r[1],
+                "user_name": r[2],
+                "user_email": r[3],
+                "session_id": r[4],
+                "message_content": r[5],
+                "trigger_word": r[6],
+                "flagged_at": r[7],
+                "reviewed": bool(r[8])
+            }
+            for r in results
+        ]
+
+    def mark_crisis_reviewed(self, flag_id: str) -> bool:
+        """Mark a crisis flag as reviewed."""
+        self.conn.execute(
+            "UPDATE crisis_flags SET reviewed = 1 WHERE id = ?",
+            (flag_id,)
+        )
+        self.conn.commit()
+        return True
+
+    def get_dashboard_stats(self) -> dict:
+        """Get overview statistics for admin dashboard."""
+        # Total users
+        total_users = self.conn.execute(
+            "SELECT COUNT(*) FROM users"
+        ).fetchone()[0]
+
+        # Sessions today
+        sessions_today = self.conn.execute(
+            """SELECT COUNT(*) FROM sessions
+               WHERE DATE(started_at) = DATE('now')"""
+        ).fetchone()[0]
+
+        # Unreviewed crisis flags
+        unreviewed_alerts = self.conn.execute(
+            "SELECT COUNT(*) FROM crisis_flags WHERE reviewed = 0"
+        ).fetchone()[0]
+
+        # Average mood improvement (mood_end - mood_start for completed sessions)
+        mood_result = self.conn.execute(
+            """SELECT AVG(mood_end - mood_start)
+               FROM sessions
+               WHERE mood_start IS NOT NULL
+               AND mood_end IS NOT NULL
+               AND completed = 1"""
+        ).fetchone()
+        avg_mood_change = round(mood_result[0], 2) if mood_result[0] else 0
+
+        # Total sessions
+        total_sessions = self.conn.execute(
+            "SELECT COUNT(*) FROM sessions"
+        ).fetchone()[0]
+
+        # Completed sessions
+        completed_sessions = self.conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE completed = 1"
+        ).fetchone()[0]
+
+        return {
+            "total_users": total_users,
+            "sessions_today": sessions_today,
+            "unreviewed_alerts": unreviewed_alerts,
+            "avg_mood_change": avg_mood_change,
+            "total_sessions": total_sessions,
+            "completed_sessions": completed_sessions
+        }
+
+    def get_user_wearable_summary(self, user_id: str) -> dict:
+        """Get vitals summary for a patient."""
+        # Get stats for day, week, month
+        day_stats = self.get_wearable_stats(user_id, "day")
+        week_stats = self.get_wearable_stats(user_id, "week")
+        month_stats = self.get_wearable_stats(user_id, "month")
+
+        # Get latest reading
+        latest = self.get_latest_wearable_data(user_id)
+
+        return {
+            "latest": latest,
+            "day": day_stats,
+            "week": week_stats,
+            "month": month_stats
+        }
+
+    def get_wearable_timeseries(self, user_id: str, hours: int = 24) -> list:
+        """Get time-series wearable data for charts."""
+        results = self.conn.execute(
+            """SELECT ppg, gsr, acc_x, acc_y, acc_z, recorded_at
+               FROM wearable_data
+               WHERE user_id = ?
+               AND recorded_at >= datetime('now', ? || ' hours')
+               ORDER BY recorded_at ASC""",
+            (user_id, -hours)
+        ).fetchall()
+
+        return [
+            {
+                "ppg": r[0],
+                "gsr": r[1],
+                "acc_x": r[2],
+                "acc_y": r[3],
+                "acc_z": r[4],
+                "recorded_at": r[5]
+            }
+            for r in results
+        ]
+
+    def get_daily_session_counts(self, days: int = 30) -> list:
+        """Get daily session counts for trend chart."""
+        results = self.conn.execute(
+            """SELECT DATE(started_at) as day, COUNT(*) as count
+               FROM sessions
+               WHERE started_at >= datetime('now', ? || ' days')
+               GROUP BY DATE(started_at)
+               ORDER BY day ASC""",
+            (-days,)
+        ).fetchall()
+
+        return [{"date": r[0], "count": r[1]} for r in results]
+
+    def get_distortion_distribution(self) -> dict:
+        """Get aggregate distortion group distribution."""
+        results = self.conn.execute(
+            """SELECT locked_group, COUNT(*) as count
+               FROM sessions
+               WHERE locked_group IS NOT NULL AND locked_group != 'G0'
+               GROUP BY locked_group"""
+        ).fetchall()
+
+        distribution = {"G1": 0, "G2": 0, "G3": 0, "G4": 0}
+        for r in results:
+            if r[0] in distribution:
+                distribution[r[0]] = r[1]
+
+        return distribution
+
+    def get_user_mood_history(self, user_id: str, limit: int = 20) -> list:
+        """Get mood history for a user's sessions."""
+        results = self.conn.execute(
+            """SELECT started_at, mood_start, mood_end, locked_group, completed
+               FROM sessions
+               WHERE user_id = ?
+               AND mood_start IS NOT NULL
+               ORDER BY started_at DESC
+               LIMIT ?""",
+            (user_id, limit)
+        ).fetchall()
+
+        return [
+            {
+                "date": r[0],
+                "mood_start": r[1],
+                "mood_end": r[2],
+                "locked_group": r[3],
+                "completed": bool(r[4])
+            }
+            for r in reversed(results)  # Chronological order
+        ]
+
+    def get_user_distortion_pattern(self, user_id: str) -> dict:
+        """Get distortion pattern for radar chart."""
+        stats = self.get_user_stats(user_id)
+        counts = stats.get("distortion_counts", {})
+
+        return {
+            "G1": counts.get("G1", 0),
+            "G2": counts.get("G2", 0),
+            "G3": counts.get("G3", 0),
+            "G4": counts.get("G4", 0)
+        }
 
 
 # Singleton instance

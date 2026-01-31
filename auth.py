@@ -16,6 +16,14 @@ from database import get_db
 JWT_SECRET = os.environ.get("JWT_SECRET", "your-secret-key-change-in-production")
 JWT_EXPIRY_HOURS = 24 * 7  # 7 days
 
+# Admin Configuration
+# Comma-separated list of admin emails
+ADMIN_EMAILS = [
+    email.strip().lower()
+    for email in os.environ.get("ADMIN_EMAILS", "").split(",")
+    if email.strip()
+]
+
 
 def hash_password(password: str) -> str:
     """Hash password using SHA-256."""
@@ -128,24 +136,24 @@ def register_user(email: str, password: str, name: str, context: str = "person")
 def login_user(email: str, password: str) -> dict:
     """
     Login a user.
-    
+
     Returns:
         dict with user info and token, or error
     """
     if not email or not password:
         return {"error": "Email and password are required"}
-    
+
     db = get_db()
     user = db.get_user_by_email(email)
-    
+
     if not user:
         return {"error": "Invalid email or password"}
-    
+
     if not verify_password(password, user["password_hash"]):
         return {"error": "Invalid email or password"}
-    
+
     token = generate_token(user["id"], user["email"])
-    
+
     return {
         "success": True,
         "user": {
@@ -156,3 +164,45 @@ def login_user(email: str, password: str) -> dict:
         },
         "token": token
     }
+
+
+def is_admin(email: str) -> bool:
+    """Check if an email is in the admin list."""
+    return email.lower() in ADMIN_EMAILS
+
+
+def admin_required(f):
+    """Decorator to require valid JWT token AND admin privileges."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+
+        # Get token from header
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
+
+        if not token:
+            return jsonify({"error": "Token is missing"}), 401
+
+        # Decode token
+        payload = decode_token(token)
+        if not payload:
+            return jsonify({"error": "Token is invalid or expired"}), 401
+
+        # Get user from database
+        db = get_db()
+        user = db.get_user_by_id(payload["user_id"])
+        if not user:
+            return jsonify({"error": "User not found"}), 401
+
+        # Check if user is admin
+        if not is_admin(user["email"]):
+            return jsonify({"error": "Admin access required"}), 403
+
+        # Add user to request context
+        request.current_user = user
+
+        return f(*args, **kwargs)
+
+    return decorated

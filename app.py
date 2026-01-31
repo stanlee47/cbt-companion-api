@@ -13,10 +13,18 @@ from auth import register_user, login_user, token_required
 from crisis_detector import check_for_crisis, get_crisis_response, get_crisis_resources
 from prompts import STAGE_GOALS, SUMMARIES, NATURAL_ENDINGS
 from exercises import get_exercise_for_group
+from wearable import wearable_bp
+from admin import admin_bp
 import os
 
-app = Flask(__name__)
+app = Flask(__name__,
+            template_folder='templates',
+            static_folder='static')
 CORS(app)
+
+# Register blueprints
+app.register_blueprint(wearable_bp)
+app.register_blueprint(admin_bp)
 
 # Initialize components
 classifier = DistortionClassifier()
@@ -28,8 +36,8 @@ def home():
     return jsonify({
         "status": "online",
         "app": "CBT Companion",
-        "version": "2.0.0",
-        "features": ["multi-user", "auth", "crisis-detection"]
+        "version": "2.1.0",
+        "features": ["multi-user", "auth", "crisis-detection", "wearable-integration"]
     })
 
 
