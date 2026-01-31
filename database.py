@@ -238,8 +238,8 @@ class Database:
             updates["stages_reached"] = kwargs["current_stage"]
         
         set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
-        values = list(updates.values()) + [session_id]
-        
+        values = tuple(list(updates.values()) + [session_id])
+
         self.conn.execute(
             f"UPDATE sessions SET {set_clause} WHERE id = ?",
             values
