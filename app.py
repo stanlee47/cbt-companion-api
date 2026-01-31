@@ -161,7 +161,8 @@ def chat():
         data = request.json
         user_message = data.get("message", "").strip()
         session_id = data.get("session_id")
-        
+        conversation_history = data.get("conversation_history", [])  # Get history from client
+
         if not user_message:
             return jsonify({"error": "Message is required"}), 400
         
@@ -208,12 +209,8 @@ def chat():
         # ========== NATURAL EXIT CHECK ==========
         if is_natural_exit(user_message):
             response = handle_natural_exit(session, user, db, session_id)
-            db.add_message(session_id, user["id"], "user", user_message)
-            db.add_message(session_id, user["id"], "assistant", response["response"])
+            # Only save to DB if crisis - skip normal messages
             return jsonify(response)
-        
-        # Add user message to history
-        db.add_message(session_id, user["id"], "user", user_message)
         
         # ========== CLASSIFICATION ==========
         locked_group = session["locked_group"]
@@ -228,15 +225,15 @@ def chat():
             if detected_group == "G0":
                 # No distortion - listen supportively
                 db.update_session(session_id, locked_group="G0")
-                
+
                 response_text = groq_client.generate_supportive_response(
                     user_message=user_message,
-                    conversation_history=db.get_recent_messages(session_id, 6),
+                    conversation_history=conversation_history[-6:],  # From client
                     user_name=user["name"]
                 )
-                
-                db.add_message(session_id, user["id"], "assistant", response_text)
-                
+
+                # Don't save to DB - only save crisis messages
+
                 return jsonify({
                     "response": response_text,
                     "detected_group": "G0",
@@ -266,10 +263,10 @@ def chat():
         # Get stage info
         stage_info = STAGE_GOALS[locked_group][current_stage]
         
-        # Generate response
+        # Generate response (use client-provided history, not DB)
         llm_response = groq_client.generate_therapeutic_response(
             user_message=user_message,
-            conversation_history=db.get_recent_messages(session_id, 6),
+            conversation_history=conversation_history[-6:],  # Last 6 messages from client
             user_name=user["name"],
             user_context=user["context"],
             detected_group=locked_group,
@@ -303,10 +300,9 @@ def chat():
             db.update_session(session_id, completed=1)
             summary = SUMMARIES[locked_group]
             response_text = response_text + "\n\n---\n\n" + summary
-        
-        # Save assistant message
-        db.add_message(session_id, user["id"], "assistant", response_text)
-        
+
+        # Don't save to DB - only crisis messages are saved
+
         # Group display names
         group_names = {
             "G1": "Binary & Absolute Thinking",
