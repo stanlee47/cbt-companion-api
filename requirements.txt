@@ -4,9 +4,10 @@ flask-cors==4.0.0
 gunicorn==21.2.0
 
 # AI/ML
+numpy<2
 transformers==4.36.0
 torch==2.1.0
-groq==0.4.0
+groq==0.9.0
 
 # Database (Turso)
 libsql-experimental==0.0.47
