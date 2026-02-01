@@ -3,7 +3,7 @@ Admin Panel Module
 Handles admin routes, authentication, and dashboard functionality
 """
 
-from flask import Blueprint, render_template, jsonify, request
+from flask import Blueprint, render_template, jsonify, request, redirect, url_for
 from auth import admin_required, login_user, is_admin, generate_token
 from database import get_db
 
@@ -11,6 +11,12 @@ admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
 
 
 # ==================== PAGE ROUTES ====================
+
+@admin_bp.route('/')
+def admin_index():
+    """Redirect /admin to /admin/login."""
+    return redirect(url_for('admin.admin_login_page'))
+
 
 @admin_bp.route('/login')
 def admin_login_page():
@@ -38,6 +44,11 @@ def admin_patient_detail_page(user_id):
 
 # ==================== API ROUTES ====================
 
+# Hardcoded admin credentials
+ADMIN_USERNAME = "admin123"
+ADMIN_PASSWORD = "1234"
+
+
 @admin_bp.route('/api/login', methods=['POST'])
 def admin_login():
     """Admin login endpoint."""
@@ -45,7 +56,21 @@ def admin_login():
     email = data.get('email', '')
     password = data.get('password', '')
 
-    # Use existing login logic
+    # Check hardcoded admin credentials first
+    if email == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        token = generate_token("admin", ADMIN_USERNAME)
+        return jsonify({
+            'success': True,
+            'user': {
+                'id': 'admin',
+                'email': ADMIN_USERNAME,
+                'name': 'Admin',
+                'context': 'admin'
+            },
+            'token': token
+        })
+
+    # Fallback to existing login logic
     result = login_user(email, password)
 
     if 'error' in result:
