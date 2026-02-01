@@ -142,6 +142,26 @@ class Database:
             ON wearable_data(user_id, recorded_at DESC)
         """)
 
+        # Device API keys for wearables
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS device_keys (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                api_key TEXT UNIQUE NOT NULL,
+                device_name TEXT DEFAULT 'ESP32 Wearable',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_used_at TEXT,
+                is_active INTEGER DEFAULT 1,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+
+        # Index for fast API key lookups
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_device_api_key
+            ON device_keys(api_key)
+        """)
+
         self.conn.commit()
     
     # ==================== USER OPERATIONS ====================
@@ -581,6 +601,97 @@ class Database:
             "gsr": {"avg": None, "min": None, "max": None},
             "accelerometer": {"avg_x": None, "avg_y": None, "avg_z": None}
         }
+
+    # ==================== DEVICE KEY OPERATIONS ====================
+
+    def create_device_key(self, user_id: str, device_name: str = "ESP32 Wearable") -> dict:
+        """Create a new device API key for a user."""
+        import secrets
+
+        key_id = str(uuid.uuid4())
+        # Generate a secure 32-character API key
+        api_key = secrets.token_hex(16)
+
+        self.conn.execute(
+            """INSERT INTO device_keys (id, user_id, api_key, device_name)
+               VALUES (?, ?, ?, ?)""",
+            (key_id, user_id, api_key, device_name)
+        )
+        self.conn.commit()
+
+        return {
+            "id": key_id,
+            "api_key": api_key,
+            "device_name": device_name,
+            "created_at": datetime.utcnow().isoformat()
+        }
+
+    def get_user_by_device_key(self, api_key: str) -> dict:
+        """Get user associated with a device API key."""
+        result = self.conn.execute(
+            """SELECT u.id, u.email, u.name, u.context, dk.id as device_id
+               FROM device_keys dk
+               JOIN users u ON dk.user_id = u.id
+               WHERE dk.api_key = ? AND dk.is_active = 1""",
+            (api_key,)
+        ).fetchone()
+
+        if result:
+            # Update last_used_at
+            self.conn.execute(
+                "UPDATE device_keys SET last_used_at = ? WHERE api_key = ?",
+                (datetime.utcnow().isoformat(), api_key)
+            )
+            self.conn.commit()
+
+            return {
+                "id": result[0],
+                "email": result[1],
+                "name": result[2],
+                "context": result[3],
+                "device_id": result[4]
+            }
+        return None
+
+    def get_user_device_keys(self, user_id: str) -> list:
+        """Get all device keys for a user."""
+        results = self.conn.execute(
+            """SELECT id, api_key, device_name, created_at, last_used_at, is_active
+               FROM device_keys
+               WHERE user_id = ?
+               ORDER BY created_at DESC""",
+            (user_id,)
+        ).fetchall()
+
+        return [
+            {
+                "id": r[0],
+                "api_key": r[1][:8] + "..." + r[1][-4:],  # Masked for security
+                "device_name": r[2],
+                "created_at": r[3],
+                "last_used_at": r[4],
+                "is_active": bool(r[5])
+            }
+            for r in results
+        ]
+
+    def revoke_device_key(self, key_id: str, user_id: str) -> bool:
+        """Revoke a device API key."""
+        result = self.conn.execute(
+            "UPDATE device_keys SET is_active = 0 WHERE id = ? AND user_id = ?",
+            (key_id, user_id)
+        )
+        self.conn.commit()
+        return result.rowcount > 0
+
+    def delete_device_key(self, key_id: str, user_id: str) -> bool:
+        """Permanently delete a device API key."""
+        result = self.conn.execute(
+            "DELETE FROM device_keys WHERE id = ? AND user_id = ?",
+            (key_id, user_id)
+        )
+        self.conn.commit()
+        return result.rowcount > 0
 
     # ==================== ADMIN OPERATIONS ====================
 
