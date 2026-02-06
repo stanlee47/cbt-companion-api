@@ -1,12 +1,22 @@
 """
 Wearable Device Module
 Handles sensor data from wearable devices (PPG, GSR, Accelerometer)
+Includes DRI (Depression Risk Index) tracking and alert system
 """
 
+import logging
 from flask import Blueprint, request, jsonify
 from auth import token_required
 from database import get_db
 from datetime import datetime
+
+# ==================== LOGGING SETUP ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | WEARABLE | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger('wearable')
 
 wearable_bp = Blueprint('wearable', __name__)
 
@@ -24,6 +34,8 @@ def receive_sensor_data():
         "acc_x": 0.12,         # Accelerometer X-axis
         "acc_y": -0.05,        # Accelerometer Y-axis
         "acc_z": 9.81,         # Accelerometer Z-axis
+        "dri_score": 0.45,     # Optional: Depression Risk Index
+        "condition": "NORMAL", # Optional: NORMAL, MILD_STRESS, HIGH_STRESS
         "timestamp": "2024-01-31T12:00:00Z"  # Optional: device timestamp
     }
     """
@@ -32,8 +44,10 @@ def receive_sensor_data():
         db = get_db()
 
         data = request.json
+        logger.info(f"📥 Received data from user {user['name']} ({user['email']})")
 
         if not data:
+            logger.warning(f"❌ No data provided by user {user['email']}")
             return jsonify({"error": "No data provided"}), 400
 
         # Extract sensor values
@@ -42,14 +56,25 @@ def receive_sensor_data():
         acc_x = data.get("acc_x")
         acc_y = data.get("acc_y")
         acc_z = data.get("acc_z")
+        dri_score = data.get("dri_score")
+        condition = data.get("condition")
         device_timestamp = data.get("timestamp")
 
         # Validate required fields
         if ppg is None or gsr is None:
+            logger.warning(f"❌ Missing ppg/gsr from user {user['email']}")
             return jsonify({"error": "ppg and gsr values are required"}), 400
 
         if acc_x is None or acc_y is None or acc_z is None:
+            logger.warning(f"❌ Missing accelerometer data from user {user['email']}")
             return jsonify({"error": "acc_x, acc_y, and acc_z values are required"}), 400
+
+        # Log sensor data
+        logger.info(f"📊 Sensors: PPG={ppg:.2f}, GSR={gsr:.2f}, ACC=({acc_x:.2f}, {acc_y:.2f}, {acc_z:.2f})")
+        if dri_score is not None:
+            logger.info(f"🧠 DRI Score: {dri_score:.3f} | Condition: {condition}")
+            if condition == "HIGH_STRESS":
+                logger.warning(f"🚨 HIGH STRESS DETECTED for user {user['name']} ({user['email']}) - DRI: {dri_score:.3f}")
 
         # Save to database
         record_id = db.save_wearable_data(
@@ -59,8 +84,12 @@ def receive_sensor_data():
             acc_x=float(acc_x),
             acc_y=float(acc_y),
             acc_z=float(acc_z),
+            dri_score=float(dri_score) if dri_score is not None else None,
+            condition=condition,
             device_timestamp=device_timestamp
         )
+
+        logger.info(f"✅ Data saved successfully - Record ID: {record_id}")
 
         return jsonify({
             "success": True,
@@ -69,9 +98,10 @@ def receive_sensor_data():
         })
 
     except ValueError as e:
+        logger.error(f"❌ Invalid data format: {str(e)}")
         return jsonify({"error": f"Invalid data format: {str(e)}"}), 400
     except Exception as e:
-        print(f"Error saving wearable data: {str(e)}")
+        logger.error(f"❌ Error saving wearable data: {str(e)}")
         return jsonify({"error": "Failed to save sensor data"}), 500
 
 
@@ -348,14 +378,18 @@ def receive_device_data():
         "acc_x": 0.12,
         "acc_y": -0.05,
         "acc_z": 9.81,
+        "dri_score": 0.45,     # Optional: from ESP32 calculation
+        "condition": "NORMAL", # Optional: NORMAL, MILD_STRESS, HIGH_STRESS
         "timestamp": "2024-01-31T12:00:00Z"  # Optional
     }
     """
     try:
         # Get device API key from header
         api_key = request.headers.get("X-Device-Key")
+        logger.info(f"📥 Incoming ESP32 request - API Key: {api_key[:8]}..." if api_key else "📥 Incoming ESP32 request - NO API KEY")
 
         if not api_key:
+            logger.warning("❌ Missing X-Device-Key header")
             return jsonify({"error": "X-Device-Key header is required"}), 401
 
         db = get_db()
@@ -364,11 +398,15 @@ def receive_device_data():
         user = db.get_user_by_device_key(api_key)
 
         if not user:
+            logger.warning(f"❌ Invalid or revoked device key: {api_key[:8]}...")
             return jsonify({"error": "Invalid or revoked device key"}), 401
+
+        logger.info(f"✅ Authenticated device for user: {user['name']} ({user['email']})")
 
         data = request.json
 
         if not data:
+            logger.warning(f"❌ No data in request body")
             return jsonify({"error": "No data provided"}), 400
 
         # Extract sensor values
@@ -377,14 +415,31 @@ def receive_device_data():
         acc_x = data.get("acc_x")
         acc_y = data.get("acc_y")
         acc_z = data.get("acc_z")
+        dri_score = data.get("dri_score")
+        condition = data.get("condition")
         device_timestamp = data.get("timestamp")
 
         # Validate required fields
         if ppg is None or gsr is None:
+            logger.warning(f"❌ Missing ppg/gsr values")
             return jsonify({"error": "ppg and gsr values are required"}), 400
 
         if acc_x is None or acc_y is None or acc_z is None:
+            logger.warning(f"❌ Missing accelerometer values")
             return jsonify({"error": "acc_x, acc_y, and acc_z values are required"}), 400
+
+        # Log the incoming sensor data
+        logger.info(f"📊 SENSOR DATA | PPG: {ppg:.2f} | GSR: {gsr:.2f} | ACC: ({acc_x:.2f}, {acc_y:.2f}, {acc_z:.2f})")
+
+        if dri_score is not None and condition:
+            logger.info(f"🧠 MENTAL STATE | DRI: {dri_score:.3f} | Condition: {condition}")
+
+            # Alert on HIGH_STRESS
+            if condition == "HIGH_STRESS":
+                logger.warning(f"🚨🚨🚨 HIGH STRESS ALERT 🚨🚨🚨")
+                logger.warning(f"🚨 User: {user['name']} ({user['email']})")
+                logger.warning(f"🚨 DRI Score: {dri_score:.3f}")
+                logger.warning(f"🚨 This user may need immediate attention!")
 
         # Save to database
         record_id = db.save_wearable_data(
@@ -394,8 +449,12 @@ def receive_device_data():
             acc_x=float(acc_x),
             acc_y=float(acc_y),
             acc_z=float(acc_z),
+            dri_score=float(dri_score) if dri_score is not None else None,
+            condition=condition,
             device_timestamp=device_timestamp
         )
+
+        logger.info(f"✅ Data saved | Record ID: {record_id}")
 
         return jsonify({
             "success": True,
@@ -403,9 +462,10 @@ def receive_device_data():
         })
 
     except ValueError as e:
+        logger.error(f"❌ Invalid data format: {str(e)}")
         return jsonify({"error": f"Invalid data format: {str(e)}"}), 400
     except Exception as e:
-        print(f"Error saving device data: {str(e)}")
+        logger.error(f"❌ Error saving device data: {str(e)}")
         return jsonify({"error": "Failed to save sensor data"}), 500
 
 
@@ -488,5 +548,124 @@ def receive_device_batch():
         })
 
     except Exception as e:
-        print(f"Error saving device batch data: {str(e)}")
+        logger.error(f"❌ Error saving device batch data: {str(e)}")
         return jsonify({"error": "Failed to save batch data"}), 500
+
+
+# ==================== ALERT ENDPOINTS ====================
+
+@wearable_bp.route("/api/wearable/alerts", methods=["GET"])
+@token_required
+def get_alerts():
+    """
+    Get unacknowledged stress alerts for the user.
+    Used by Flutter app to check for HIGH_STRESS conditions.
+
+    Returns alerts that need user attention.
+    """
+    try:
+        user = request.current_user
+        db = get_db()
+
+        logger.info(f"📋 Checking alerts for user: {user['name']} ({user['email']})")
+
+        alerts = db.get_unacknowledged_alerts(user["id"])
+
+        # Count by severity
+        high_stress_count = sum(1 for a in alerts if a["condition"] == "HIGH_STRESS")
+        mild_stress_count = sum(1 for a in alerts if a["condition"] == "MILD_STRESS")
+
+        if high_stress_count > 0:
+            logger.warning(f"🚨 User {user['name']} has {high_stress_count} HIGH_STRESS alerts!")
+        elif mild_stress_count > 0:
+            logger.info(f"⚠️ User {user['name']} has {mild_stress_count} MILD_STRESS alerts")
+        else:
+            logger.info(f"✅ No unacknowledged alerts for user {user['name']}")
+
+        return jsonify({
+            "alerts": alerts,
+            "count": len(alerts),
+            "high_stress_count": high_stress_count,
+            "mild_stress_count": mild_stress_count,
+            "has_critical": high_stress_count > 0
+        })
+
+    except Exception as e:
+        logger.error(f"❌ Error fetching alerts: {str(e)}")
+        return jsonify({"error": "Failed to fetch alerts"}), 500
+
+
+@wearable_bp.route("/api/wearable/alerts/latest", methods=["GET"])
+@token_required
+def get_latest_alert():
+    """
+    Get the most recent HIGH_STRESS alert for triggering full-screen notification.
+    """
+    try:
+        user = request.current_user
+        db = get_db()
+
+        alert = db.get_latest_high_stress_alert(user["id"])
+
+        if alert:
+            logger.warning(f"🚨 Returning HIGH_STRESS alert for {user['name']}: DRI={alert['dri_score']:.3f}")
+            return jsonify({
+                "has_alert": True,
+                "alert": alert
+            })
+        else:
+            return jsonify({
+                "has_alert": False,
+                "alert": None
+            })
+
+    except Exception as e:
+        logger.error(f"❌ Error fetching latest alert: {str(e)}")
+        return jsonify({"error": "Failed to fetch alert"}), 500
+
+
+@wearable_bp.route("/api/wearable/alerts/acknowledge", methods=["POST"])
+@token_required
+def acknowledge_alerts():
+    """
+    Acknowledge alerts so they don't trigger again.
+
+    JSON payload:
+    {
+        "alert_id": "specific-alert-id"  # Optional: acknowledge specific alert
+    }
+
+    If alert_id is not provided, acknowledges ALL alerts for the user.
+    """
+    try:
+        user = request.current_user
+        db = get_db()
+
+        data = request.json or {}
+        alert_id = data.get("alert_id")
+
+        if alert_id:
+            # Acknowledge specific alert
+            success = db.acknowledge_alert(alert_id, user["id"])
+            if success:
+                logger.info(f"✅ Alert {alert_id} acknowledged by {user['name']}")
+                return jsonify({
+                    "success": True,
+                    "message": "Alert acknowledged"
+                })
+            else:
+                logger.warning(f"❌ Alert {alert_id} not found for user {user['name']}")
+                return jsonify({"error": "Alert not found"}), 404
+        else:
+            # Acknowledge all alerts
+            count = db.acknowledge_all_alerts(user["id"])
+            logger.info(f"✅ {count} alerts acknowledged by {user['name']}")
+            return jsonify({
+                "success": True,
+                "acknowledged_count": count,
+                "message": f"{count} alerts acknowledged"
+            })
+
+    except Exception as e:
+        logger.error(f"❌ Error acknowledging alerts: {str(e)}")
+        return jsonify({"error": "Failed to acknowledge alerts"}), 500
