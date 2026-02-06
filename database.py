@@ -139,6 +139,20 @@ class Database:
             )
         """)
 
+        # Migrate: add columns that may be missing from older table versions
+        for col, col_type, default in [
+            ("dri_score", "REAL", None),
+            ("condition", "TEXT", None),
+            ("acknowledged", "INTEGER", "0"),
+        ]:
+            try:
+                default_clause = f" DEFAULT {default}" if default is not None else ""
+                self.conn.execute(
+                    f"ALTER TABLE wearable_data ADD COLUMN {col} {col_type}{default_clause}"
+                )
+            except Exception:
+                pass  # Column already exists
+
         # Create index for faster queries on wearable data
         self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_wearable_user_time
