@@ -120,7 +120,7 @@ class Database:
             )
         """)
 
-        # Wearable sensor data with DRI and condition
+        # Wearable sensor data
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS wearable_data (
                 id TEXT PRIMARY KEY,
@@ -130,9 +130,6 @@ class Database:
                 acc_x REAL NOT NULL,
                 acc_y REAL NOT NULL,
                 acc_z REAL NOT NULL,
-                dri_score REAL,
-                condition TEXT,
-                acknowledged INTEGER DEFAULT 0,
                 device_timestamp TEXT,
                 recorded_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id)
@@ -494,16 +491,15 @@ class Database:
 
     def save_wearable_data(self, user_id: str, ppg: float, gsr: float,
                            acc_x: float, acc_y: float, acc_z: float,
-                           dri_score: float = None, condition: str = None,
                            device_timestamp: str = None) -> str:
-        """Save wearable sensor data with DRI score and condition."""
+        """Save wearable sensor data."""
         record_id = str(uuid.uuid4())
 
         self.conn.execute(
             """INSERT INTO wearable_data
-               (id, user_id, ppg, gsr, acc_x, acc_y, acc_z, dri_score, condition, device_timestamp)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (record_id, user_id, ppg, gsr, acc_x, acc_y, acc_z, dri_score, condition, device_timestamp)
+               (id, user_id, ppg, gsr, acc_x, acc_y, acc_z, device_timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (record_id, user_id, ppg, gsr, acc_x, acc_y, acc_z, device_timestamp)
         )
         self.conn.commit()
 
@@ -512,8 +508,7 @@ class Database:
     def get_latest_wearable_data(self, user_id: str) -> dict:
         """Get the most recent wearable data for a user."""
         result = self.conn.execute(
-            """SELECT id, ppg, gsr, acc_x, acc_y, acc_z, dri_score, condition,
-                      acknowledged, device_timestamp, recorded_at
+            """SELECT id, ppg, gsr, acc_x, acc_y, acc_z, device_timestamp, recorded_at
                FROM wearable_data WHERE user_id = ?
                ORDER BY recorded_at DESC LIMIT 1""",
             (user_id,)
@@ -527,11 +522,8 @@ class Database:
                 "acc_x": result[3],
                 "acc_y": result[4],
                 "acc_z": result[5],
-                "dri_score": result[6],
-                "condition": result[7],
-                "acknowledged": bool(result[8]) if result[8] is not None else False,
-                "device_timestamp": result[9],
-                "recorded_at": result[10]
+                "device_timestamp": result[6],
+                "recorded_at": result[7]
             }
         return None
 
@@ -539,8 +531,7 @@ class Database:
                              offset: int = 0, start_date: str = None,
                              end_date: str = None) -> list:
         """Get wearable data history for a user."""
-        query = """SELECT id, ppg, gsr, acc_x, acc_y, acc_z, dri_score, condition,
-                          acknowledged, device_timestamp, recorded_at
+        query = """SELECT id, ppg, gsr, acc_x, acc_y, acc_z, device_timestamp, recorded_at
                    FROM wearable_data WHERE user_id = ?"""
         params = [user_id]
 
@@ -565,11 +556,8 @@ class Database:
                 "acc_x": r[3],
                 "acc_y": r[4],
                 "acc_z": r[5],
-                "dri_score": r[6],
-                "condition": r[7],
-                "acknowledged": bool(r[8]) if r[8] is not None else False,
-                "device_timestamp": r[9],
-                "recorded_at": r[10]
+                "device_timestamp": r[6],
+                "recorded_at": r[7]
             }
             for r in results
         ]
@@ -718,70 +706,6 @@ class Database:
         )
         self.conn.commit()
         return result.rowcount > 0
-
-    # ==================== ALERT OPERATIONS ====================
-
-    def get_unacknowledged_alerts(self, user_id: str) -> list:
-        """Get unacknowledged HIGH_STRESS or MILD_STRESS alerts for a user."""
-        results = self.conn.execute(
-            """SELECT id, dri_score, condition, recorded_at
-               FROM wearable_data
-               WHERE user_id = ? AND acknowledged = 0
-               AND condition IN ('HIGH_STRESS', 'MILD_STRESS')
-               ORDER BY recorded_at DESC""",
-            (user_id,)
-        ).fetchall()
-
-        return [
-            {
-                "id": r[0],
-                "dri_score": r[1],
-                "condition": r[2],
-                "recorded_at": r[3]
-            }
-            for r in results
-        ]
-
-    def acknowledge_alert(self, alert_id: str, user_id: str) -> bool:
-        """Mark a single alert as acknowledged."""
-        result = self.conn.execute(
-            "UPDATE wearable_data SET acknowledged = 1 WHERE id = ? AND user_id = ?",
-            (alert_id, user_id)
-        )
-        self.conn.commit()
-        return result.rowcount > 0
-
-    def acknowledge_all_alerts(self, user_id: str) -> int:
-        """Mark all alerts as acknowledged for a user."""
-        result = self.conn.execute(
-            """UPDATE wearable_data SET acknowledged = 1
-               WHERE user_id = ? AND acknowledged = 0
-               AND condition IN ('HIGH_STRESS', 'MILD_STRESS')""",
-            (user_id,)
-        )
-        self.conn.commit()
-        return result.rowcount
-
-    def get_latest_high_stress_alert(self, user_id: str) -> dict:
-        """Get the most recent unacknowledged HIGH_STRESS alert."""
-        result = self.conn.execute(
-            """SELECT id, dri_score, condition, ppg, gsr, recorded_at
-               FROM wearable_data
-               WHERE user_id = ? AND acknowledged = 0 AND condition = 'HIGH_STRESS'
-               ORDER BY recorded_at DESC LIMIT 1""",
-            (user_id,)
-        ).fetchone()
-
-        if result:
-            return {
-                "id": result[0],
-                "dri_score": result[1],
-                "condition": result[2],
-                "ppg": result[3],
-                "gsr": result[4],
-                "recorded_at": result[5]
-            }
-        return None
 
     # ==================== ADMIN OPERATIONS ====================
 
