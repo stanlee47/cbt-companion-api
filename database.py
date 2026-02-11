@@ -176,6 +176,52 @@ class Database:
             ON device_keys(api_key)
         """)
 
+        # Beck sessions table for cognitive restructuring protocol
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS beck_sessions (
+                session_id TEXT PRIMARY KEY,
+
+                -- Current state in the protocol
+                beck_state TEXT DEFAULT 'VALIDATE',
+
+                -- Phase 1: Capture
+                original_thought TEXT,
+                initial_belief_rating INTEGER,
+                emotion TEXT,
+                initial_emotion_intensity INTEGER,
+
+                -- Phase 2: Discovery (6 Questions)
+                q1_evidence_for TEXT,
+                q1_evidence_against TEXT,
+                q2_alternative TEXT,
+                q3_worst TEXT,
+                q3_best TEXT,
+                q3_realistic TEXT,
+                q4_effect TEXT,
+                q5_friend TEXT,
+                q6_action TEXT,
+
+                -- Phase 3: Reframe
+                adaptive_thought TEXT,
+                new_thought_belief INTEGER,
+
+                -- Phase 4: Measure
+                final_belief_rating INTEGER,
+                final_emotion_intensity INTEGER,
+
+                -- Phase 5: Action
+                action_plan TEXT,
+
+                -- Metadata
+                started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                completed_at TEXT,
+                belief_improvement INTEGER,
+                emotion_improvement INTEGER,
+
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            )
+        """)
+
         self.conn.commit()
     
     # ==================== USER OPERATIONS ====================
@@ -985,6 +1031,107 @@ class Database:
             "G3": counts.get("G3", 0),
             "G4": counts.get("G4", 0)
         }
+
+    # ==================== BECK SESSION OPERATIONS ====================
+
+    def create_beck_session(self, session_id: str) -> dict:
+        """Initialize a Beck session when distortion is detected."""
+        try:
+            self.conn.execute(
+                """INSERT INTO beck_sessions (session_id, beck_state)
+                   VALUES (?, 'VALIDATE')""",
+                (session_id,)
+            )
+            self.conn.commit()
+            return {"session_id": session_id, "beck_state": "VALIDATE"}
+        except Exception as e:
+            print(f"Error creating Beck session: {e}")
+            return None
+
+    def get_beck_session(self, session_id: str) -> dict:
+        """Get current Beck session state and all data."""
+        result = self.conn.execute(
+            """SELECT session_id, beck_state, original_thought, initial_belief_rating,
+                      emotion, initial_emotion_intensity, q1_evidence_for, q1_evidence_against,
+                      q2_alternative, q3_worst, q3_best, q3_realistic, q4_effect, q5_friend,
+                      q6_action, adaptive_thought, new_thought_belief, final_belief_rating,
+                      final_emotion_intensity, action_plan, started_at, completed_at,
+                      belief_improvement, emotion_improvement
+               FROM beck_sessions WHERE session_id = ?""",
+            (session_id,)
+        ).fetchone()
+
+        if result:
+            return {
+                "session_id": result[0],
+                "beck_state": result[1],
+                "original_thought": result[2],
+                "initial_belief_rating": result[3],
+                "emotion": result[4],
+                "initial_emotion_intensity": result[5],
+                "q1_evidence_for": result[6],
+                "q1_evidence_against": result[7],
+                "q2_alternative": result[8],
+                "q3_worst": result[9],
+                "q3_best": result[10],
+                "q3_realistic": result[11],
+                "q4_effect": result[12],
+                "q5_friend": result[13],
+                "q6_action": result[14],
+                "adaptive_thought": result[15],
+                "new_thought_belief": result[16],
+                "final_belief_rating": result[17],
+                "final_emotion_intensity": result[18],
+                "action_plan": result[19],
+                "started_at": result[20],
+                "completed_at": result[21],
+                "belief_improvement": result[22],
+                "emotion_improvement": result[23]
+            }
+        return None
+
+    def update_beck_state(self, session_id: str, new_state: str, **fields):
+        """Update state and save any new field values."""
+        # Start with state update
+        updates = {"beck_state": new_state}
+        updates.update(fields)
+
+        set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
+        values = tuple(list(updates.values()) + [session_id])
+
+        self.conn.execute(
+            f"UPDATE beck_sessions SET {set_clause} WHERE session_id = ?",
+            values
+        )
+        self.conn.commit()
+
+    def complete_beck_session(self, session_id: str):
+        """Mark session complete, calculate improvements."""
+        # Get current data
+        beck_data = self.get_beck_session(session_id)
+        if not beck_data:
+            return
+
+        # Calculate improvements
+        belief_improvement = None
+        emotion_improvement = None
+
+        if beck_data.get('initial_belief_rating') and beck_data.get('final_belief_rating'):
+            belief_improvement = beck_data['initial_belief_rating'] - beck_data['final_belief_rating']
+
+        if beck_data.get('initial_emotion_intensity') and beck_data.get('final_emotion_intensity'):
+            emotion_improvement = beck_data['initial_emotion_intensity'] - beck_data['final_emotion_intensity']
+
+        # Update completion status
+        self.conn.execute(
+            """UPDATE beck_sessions SET
+               completed_at = CURRENT_TIMESTAMP,
+               belief_improvement = ?,
+               emotion_improvement = ?
+               WHERE session_id = ?""",
+            (belief_improvement, emotion_improvement, session_id)
+        )
+        self.conn.commit()
 
 
 # Singleton instance

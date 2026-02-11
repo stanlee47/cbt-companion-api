@@ -11,7 +11,7 @@ from groq_client import GroqClient
 from database import get_db
 from auth import register_user, login_user, token_required
 from crisis_detector import check_for_crisis, get_crisis_response, get_crisis_resources
-from prompts import STAGE_GOALS, SUMMARIES, NATURAL_ENDINGS
+from prompts import NATURAL_ENDINGS
 from exercises import get_exercise_for_group
 from wearable import wearable_bp
 from admin import admin_bp
@@ -159,182 +159,172 @@ def get_sessions():
 @token_required
 def chat():
     """
-    Main chat endpoint.
-    Handles classification, stage tracking, crisis detection, and response generation.
+    Main chat endpoint using Beck's 3-Agent Protocol.
     """
     try:
         user = request.current_user
         db = get_db()
-        
+
         data = request.json
         user_message = data.get("message", "").strip()
         session_id = data.get("session_id")
-        conversation_history = data.get("conversation_history", [])  # Get history from client
+        conversation_history = data.get("conversation_history", [])
 
-        if not user_message:
-            return jsonify({"error": "Message is required"}), 400
-        
-        if not session_id:
-            return jsonify({"error": "session_id is required"}), 400
-        
+        if not user_message or not session_id:
+            return jsonify({"error": "Message and session_id required"}), 400
+
         # Get session
         session = db.get_session(session_id)
-        if not session:
+        if not session or session["user_id"] != user["id"]:
             return jsonify({"error": "Session not found"}), 404
-        
-        if session["user_id"] != user["id"]:
-            return jsonify({"error": "Unauthorized"}), 403
-        
+
         # ========== CRISIS DETECTION ==========
         is_crisis, trigger_word = check_for_crisis(user_message)
-        
         if is_crisis:
-            # Flag in database
-            db.flag_crisis(
-                user_id=user["id"],
-                user_name=user["name"],
-                user_email=user["email"],
-                session_id=session_id,
-                message_content=user_message,
-                trigger_word=trigger_word
-            )
-            
-            # Save user message
-            db.add_message(session_id, user["id"], "user", user_message)
-            
-            # Get crisis response
+            db.flag_crisis(user["id"], user["name"], user["email"],
+                          session_id, user_message, trigger_word)
             crisis_response = get_crisis_response(user["name"])
-            db.add_message(session_id, user["id"], "assistant", crisis_response)
-            
             return jsonify({
                 "response": crisis_response,
                 "is_crisis": True,
-                "crisis_resources": get_crisis_resources(),
-                "session_state": session["state"],
-                "current_stage": session["current_stage"]
+                "crisis_resources": get_crisis_resources()
             })
-        
+
         # ========== NATURAL EXIT CHECK ==========
         if is_natural_exit(user_message):
-            response = handle_natural_exit(session, user, db, session_id)
-            # Only save to DB if crisis - skip normal messages
-            return jsonify(response)
-        
-        # ========== CLASSIFICATION ==========
-        locked_group = session["locked_group"]
-        current_stage = session["current_stage"]
-        
-        if session["state"] == "WAITING_FOR_PROBLEM" or locked_group == "G0":
-            # Run classifier
-            classification = classifier.classify(user_message)
-            detected_group = classification["group"]
-            confidence = classification["confidence"]
-            
-            if detected_group == "G0":
-                # No distortion - listen supportively
-                db.update_session(session_id, locked_group="G0")
+            return jsonify(handle_natural_exit(session, user, db, session_id))
 
+        # ========== GET OR CREATE BECK SESSION ==========
+        beck_data = db.get_beck_session(session_id)
+
+        if not beck_data:
+            # First message - check if distorted
+            classification = classifier.classify(user_message)
+
+            if classification["group"] == "G0":
+                # No distortion - supportive listening
                 response_text = groq_client.generate_supportive_response(
                     user_message=user_message,
-                    conversation_history=conversation_history[-6:],  # From client
+                    conversation_history=conversation_history[-6:],
                     user_name=user["name"]
                 )
-
-                # Don't save to DB - only save crisis messages
-
                 return jsonify({
                     "response": response_text,
-                    "detected_group": "G0",
-                    "group_name": "No Distortion Detected",
-                    "confidence": confidence,
-                    "current_stage": None,
-                    "total_stages": None,
-                    "session_state": "LISTENING"
+                    "beck_state": None,
+                    "is_beck_protocol": False
                 })
-            
             else:
-                # Distortion detected - LOCK the group
-                db.update_session(
-                    session_id,
-                    locked_group=detected_group,
-                    stages_reached=1,
-                    messages_in_current_stage=0
-                )
-                locked_group = detected_group
-                current_stage = 1
-        
-        # ========== THERAPEUTIC RESPONSE ==========
-        
-        # Increment message counter
-        messages_in_stage = db.increment_stage_messages(session_id)
-        
-        # Get stage info
-        stage_info = STAGE_GOALS[locked_group][current_stage]
-        
-        # Generate response (use client-provided history, not DB)
-        llm_response = groq_client.generate_therapeutic_response(
-            user_message=user_message,
-            conversation_history=conversation_history[-6:],  # Last 6 messages from client
-            user_name=user["name"],
-            user_context=user["context"],
-            detected_group=locked_group,
-            current_stage=current_stage,
-            stage_goal=stage_info["goal"],
-            stage_instruction=stage_info["instruction"]
-        )
-        
-        response_text = llm_response["response"]
-        should_advance = llm_response.get("advance_to_next_stage", False)
-        
-        # ========== STAGE ADVANCEMENT LOGIC ==========
-        MIN_MESSAGES_PER_STAGE = 3
-        MAX_MESSAGES_PER_STAGE = 8
-        
-        if messages_in_stage < MIN_MESSAGES_PER_STAGE:
-            should_advance = False
-        elif current_stage < 3 and messages_in_stage >= MAX_MESSAGES_PER_STAGE:
-            should_advance = True
-        # Stage 3: NO auto-advance
-        
-        # Handle advancement
-        if should_advance and current_stage < 3:
-            current_stage += 1
-            db.update_session(session_id, stages_reached=current_stage, messages_in_current_stage=0)
-        
-        # Check if session complete
-        session_complete = should_advance and current_stage >= 3
-        
-        if session_complete:
-            db.update_session(session_id, completed=1)
-            summary = SUMMARIES[locked_group]
-            response_text = response_text + "\n\n---\n\n" + summary
+                # Distortion detected - START BECK PROTOCOL
+                db.create_beck_session(session_id)
+                db.update_beck_state(session_id, "VALIDATE",
+                                    original_thought=user_message)
+                beck_data = db.get_beck_session(session_id)
 
-        # Don't save to DB - only crisis messages are saved
+        # ========== BECK PROTOCOL STATE MACHINE ==========
+        from prompts import BECK_STATES, AGENT1_STATES, AGENT3_STATES, get_next_state, get_field_to_save
 
-        # Group display names
-        group_names = {
-            "G1": "Binary & Absolute Thinking",
-            "G2": "Overgeneralized Beliefs",
-            "G3": "Attention & Focus Bias",
-            "G4": "Emotion-Driven Reasoning"
-        }
-        
+        current_state = beck_data["beck_state"]
+
+        # Determine which agent handles this state
+        if current_state in AGENT1_STATES:
+            # Agent 1: Warm Questioner
+            response_text = groq_client.agent1_warm_questioner(
+                current_state=current_state,
+                user_message=user_message,
+                beck_data=beck_data,
+                user_name=user["name"],
+                conversation_history=conversation_history[-6:]
+            )
+
+            # Save user's response to appropriate field
+            field_to_save = get_field_to_save(current_state)
+            next_state = get_next_state(current_state)
+
+            # Extract rating if this is a rating state
+            if field_to_save and ('rating' in field_to_save or 'intensity' in field_to_save):
+                rating = extract_rating(user_message)
+                if rating is not None:
+                    db.update_beck_state(session_id, next_state, **{field_to_save: rating})
+                else:
+                    db.update_beck_state(session_id, next_state)
+            elif field_to_save:
+                db.update_beck_state(session_id, next_state, **{field_to_save: user_message})
+            else:
+                db.update_beck_state(session_id, next_state)
+
+        elif current_state == "SUMMARIZING":
+            # Agent 2: Clinical Summarizer (internal)
+            clinical_summary = groq_client.agent2_clinical_summarizer(beck_data)
+
+            # Move to Agent 3
+            db.update_beck_state(session_id, "DELIVER_REFRAME")
+
+            # Get updated beck_data and call Agent 3
+            beck_data = db.get_beck_session(session_id)
+            response_text = groq_client.agent3_treatment_agent(
+                current_state="DELIVER_REFRAME",
+                user_message=user_message,
+                beck_data=beck_data,
+                clinical_summary=clinical_summary,
+                user_name=user["name"],
+                conversation_history=conversation_history[-6:]
+            )
+
+        elif current_state in AGENT3_STATES:
+            # Agent 3: Treatment Agent
+            # Need clinical summary - regenerate if needed
+            clinical_summary = groq_client.agent2_clinical_summarizer(beck_data)
+
+            response_text = groq_client.agent3_treatment_agent(
+                current_state=current_state,
+                user_message=user_message,
+                beck_data=beck_data,
+                clinical_summary=clinical_summary,
+                user_name=user["name"],
+                conversation_history=conversation_history[-6:]
+            )
+
+            # Save response and advance state
+            field_to_save = get_field_to_save(current_state)
+            next_state = get_next_state(current_state)
+
+            if field_to_save and ('rating' in field_to_save or 'belief' in field_to_save or 'intensity' in field_to_save):
+                rating = extract_rating(user_message)
+                if rating is not None:
+                    db.update_beck_state(session_id, next_state, **{field_to_save: rating})
+                else:
+                    db.update_beck_state(session_id, next_state)
+            elif field_to_save:
+                db.update_beck_state(session_id, next_state, **{field_to_save: user_message})
+            else:
+                if next_state:
+                    db.update_beck_state(session_id, next_state)
+                else:
+                    # Protocol complete
+                    db.complete_beck_session(session_id)
+
+        else:
+            # Fallback
+            response_text = groq_client.generate_supportive_response(
+                user_message, conversation_history[-6:], user["name"]
+            )
+
+        # Get updated state for response
+        beck_data = db.get_beck_session(session_id)
+
         return jsonify({
             "response": response_text,
-            "detected_group": locked_group,
-            "group_name": group_names.get(locked_group, locked_group),
-            "current_stage": current_stage,
-            "total_stages": 3,
-            "stage_name": STAGE_GOALS[locked_group][current_stage]["name"],
-            "session_state": "COMPLETED" if session_complete else "IN_PROGRESS",
-            "session_complete": session_complete
+            "beck_state": beck_data["beck_state"] if beck_data else None,
+            "is_beck_protocol": beck_data is not None,
+            "protocol_complete": beck_data["beck_state"] == "COMPLETE" if beck_data else False,
+            "belief_improvement": calculate_improvement(beck_data) if beck_data else None
         })
-        
+
     except Exception as e:
         print(f"Error in /api/chat: {str(e)}")
         import traceback
         traceback.print_exc()
-        return jsonify({"error": "Something went wrong. Please try again."}), 500
+        return jsonify({"error": "Something went wrong"}), 500
 
 
 # ==================== EXERCISE ROUTES ====================
@@ -454,32 +444,58 @@ def is_natural_exit(message: str) -> bool:
 def handle_natural_exit(session: dict, user: dict, db, session_id: str) -> dict:
     """Handle natural conversation exit."""
     import random
-    
+
     endings = NATURAL_ENDINGS
     response = random.choice(endings).replace("{name}", user["name"])
-    
-    locked_group = session.get("locked_group")
-    current_stage = session.get("current_stage")
-    
-    # If exiting from Stage 3, add summary
-    if current_stage == 3 and locked_group and locked_group != "G0":
-        summary = SUMMARIES.get(locked_group, "")
-        if summary:
-            response = summary + "\n\n" + response
-    
-    # Update session and stats
-    db.update_session(session_id, completed=1 if current_stage == 3 else 0)
-    db.update_user_stats_on_session_end(user["id"], locked_group)
-    
+
+    # Check if Beck protocol was completed
+    beck_data = db.get_beck_session(session_id)
+    if beck_data and beck_data.get("beck_state") == "COMPLETE":
+        # Get improvement stats
+        improvement = calculate_improvement(beck_data)
+        if improvement:
+            improvement_msg = "You made real progress today! "
+            if improvement.get('belief_change', 0) >= 10:
+                improvement_msg += f"Your belief shifted by {improvement['belief_change']}%. "
+            if improvement.get('emotion_change', 0) >= 10:
+                improvement_msg += f"Your emotion intensity dropped by {improvement['emotion_change']}%. "
+            response = improvement_msg + "\n\n" + response
+
+    # Update session
+    db.update_session(session_id, completed=1)
+
     return {
         "response": response,
-        "session_state": "COMPLETED" if current_stage == 3 else "ENDED",
-        "detected_group": locked_group,
-        "current_stage": current_stage,
+        "session_state": "COMPLETED",
         "natural_exit": True,
-        "session_complete": current_stage == 3,
-        "suggest_exercise": current_stage == 3 and locked_group != "G0"
+        "session_complete": True
     }
+
+
+def extract_rating(message: str) -> int:
+    """Extract a 0-100 rating from user message."""
+    import re
+    # Look for numbers
+    numbers = re.findall(r'\d+', message)
+    for num in numbers:
+        n = int(num)
+        if 0 <= n <= 100:
+            return n
+    return None
+
+
+def calculate_improvement(beck_data: dict) -> dict:
+    """Calculate belief and emotion improvement."""
+    if not beck_data:
+        return None
+
+    result = {}
+    if beck_data.get('initial_belief_rating') and beck_data.get('final_belief_rating'):
+        result['belief_change'] = beck_data['initial_belief_rating'] - beck_data['final_belief_rating']
+    if beck_data.get('initial_emotion_intensity') and beck_data.get('final_emotion_intensity'):
+        result['emotion_change'] = beck_data['initial_emotion_intensity'] - beck_data['final_emotion_intensity']
+
+    return result if result else None
 
 
 if __name__ == "__main__":
