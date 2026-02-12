@@ -279,6 +279,118 @@ Respond as Aria for the {current_state} state."""
             print(f"Agent 3 error: {e}")
             return f"You've done really good work here, {user_name}. 💙"
 
+    # ==================== COGNITIVE DISTORTION CLASSIFIER ====================
+
+    def classify_distortion(self, text: str) -> dict:
+        """
+        Classify text into cognitive distortion groups using LLM.
+
+        Groups:
+        - G0: No Distortion
+        - G1: Binary & Global Evaluation (All-or-nothing, Labeling)
+        - G2: Overgeneralized Beliefs (Overgeneralization, Mind Reading, Fortune-telling)
+        - G3: Attentional Bias (Mental Filter, Magnification)
+        - G4: Self-Referential Reasoning (Emotional Reasoning, Personalization, Should statements)
+
+        Args:
+            text: User's thought to classify
+
+        Returns:
+            dict with group, confidence, group_name, description, and distortions
+        """
+        system_prompt = """You are a cognitive distortion classifier for CBT (Cognitive Behavioral Therapy).
+
+Analyze the user's thought and classify it into ONE of these groups:
+
+G0: No Distortion - Healthy, balanced thinking
+G1: Binary & Global Evaluation - All-or-nothing thinking, Labeling
+G2: Overgeneralized Beliefs - Overgeneralization, Mind Reading, Fortune-telling
+G3: Attentional & Salience Bias - Mental Filter, Magnification/Minimization
+G4: Self-Referential & Emotion-Driven - Emotional Reasoning, Personalization, Should statements
+
+Examples:
+- "I failed my exam. I'll never succeed at anything." → G1 (all-or-nothing)
+- "My friend didn't text back. She must hate me." → G2 (mind reading)
+- "Everything in my life is terrible." → G3 (mental filter)
+- "I feel anxious so something bad must be happening." → G4 (emotional reasoning)
+- "I had a nice day today and enjoyed my lunch." → G0 (no distortion)
+
+Respond ONLY in JSON format:
+{
+  "group": "G0/G1/G2/G3/G4",
+  "confidence": 0.85,
+  "reasoning": "Brief explanation of why this classification"
+}"""
+
+        user_prompt = f'Classify this thought: "{text}"'
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=200,
+                response_format={"type": "json_object"}
+            )
+
+            result = json.loads(response.choices[0].message.content)
+            group = result.get("group", "G0")
+
+            # Group information
+            label_info = {
+                "G0": {
+                    "name": "No Distortion Detected",
+                    "description": "Healthy, balanced thinking",
+                    "distortions": []
+                },
+                "G1": {
+                    "name": "Binary & Global Evaluation",
+                    "description": "All-or-nothing thinking patterns",
+                    "distortions": ["All-or-nothing thinking", "Labeling"]
+                },
+                "G2": {
+                    "name": "Overgeneralized Beliefs",
+                    "description": "Making broad conclusions from limited evidence",
+                    "distortions": ["Overgeneralization", "Mind Reading", "Fortune-telling"]
+                },
+                "G3": {
+                    "name": "Attentional & Salience Bias",
+                    "description": "Focusing on negatives, ignoring positives",
+                    "distortions": ["Mental Filter", "Magnification"]
+                },
+                "G4": {
+                    "name": "Self-Referential & Emotion-Driven",
+                    "description": "Letting emotions drive conclusions",
+                    "distortions": ["Emotional Reasoning", "Personalization", "Should statements"]
+                }
+            }
+
+            group_info = label_info.get(group, label_info["G0"])
+
+            return {
+                "group": group,
+                "confidence": round(result.get("confidence", 0.8), 4),
+                "group_name": group_info["name"],
+                "description": group_info["description"],
+                "distortions": group_info["distortions"],
+                "reasoning": result.get("reasoning", "")
+            }
+
+        except Exception as e:
+            print(f"Classification error: {e}")
+            # Default to G0 (no distortion) on error
+            return {
+                "group": "G0",
+                "confidence": 0.5,
+                "group_name": "No Distortion Detected",
+                "description": "Healthy, balanced thinking",
+                "distortions": [],
+                "reasoning": "Classification failed, defaulting to G0"
+            }
+
     # ==================== SUPPORTIVE RESPONSE (G0 - No Distortion) ====================
 
     def generate_supportive_response(

@@ -5,16 +5,20 @@ Run this to verify the 3-agent system works
 
 import os
 from groq_client import GroqClient
-from classifier import DistortionClassifier
 
 # Test the components
 def test_classifier():
-    """Test that classifier still works for binary detection"""
+    """Test LLM-based cognitive distortion classification"""
     print("=" * 60)
-    print("TEST 1: CLASSIFIER (Binary Detection)")
+    print("TEST 1: LLM CLASSIFIER (Cognitive Distortion Detection)")
     print("=" * 60)
 
-    classifier = DistortionClassifier()
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        print("❌ GROQ_API_KEY not set - skipping classifier test")
+        return
+
+    client = GroqClient(api_key)
 
     test_cases = [
         ("I had a nice day today", "G0"),
@@ -23,12 +27,13 @@ def test_classifier():
     ]
 
     for text, expected in test_cases:
-        result = classifier.classify(text)
+        result = client.classify_distortion(text)
         print(f"\nText: {text[:50]}...")
         print(f"  Predicted: {result['group']} ({result['confidence']:.2%})")
+        print(f"  Reasoning: {result.get('reasoning', 'N/A')}")
         print(f"  Expected: {expected}")
 
-    print("\n✅ Classifier test complete\n")
+    print("\n✅ LLM Classifier test complete\n")
 
 
 def test_agent1():

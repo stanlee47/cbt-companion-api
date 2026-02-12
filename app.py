@@ -6,7 +6,6 @@ Hosted on HuggingFace Spaces
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from classifier import DistortionClassifier
 from groq_client import GroqClient
 from database import get_db
 from auth import register_user, login_user, token_required
@@ -27,7 +26,6 @@ app.register_blueprint(wearable_bp)
 app.register_blueprint(admin_bp)
 
 # Initialize components
-classifier = DistortionClassifier()
 groq_client = GroqClient(api_key=os.environ.get("GROQ_API_KEY"))
 
 
@@ -198,8 +196,8 @@ def chat():
         beck_data = db.get_beck_session(session_id)
 
         if not beck_data:
-            # First message - check if distorted
-            classification = classifier.classify(user_message)
+            # First message - check if distorted using LLM
+            classification = groq_client.classify_distortion(user_message)
 
             if classification["group"] == "G0":
                 # No distortion - supportive listening

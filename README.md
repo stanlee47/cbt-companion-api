@@ -14,7 +14,7 @@ Backend API for the CBT Companion mental health support app.
 ## Features
 
 - 🔐 User authentication (register/login)
-- 🧠 Cognitive distortion classification (TinyBERT)
+- 🧠 Cognitive distortion classification (LLM-based)
 - 💬 Therapeutic conversations (Groq LLaMA 3.3)
 - 🚨 Crisis detection and flagging
 - 📊 User statistics tracking
