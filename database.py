@@ -141,6 +141,9 @@ class Database:
             ("dri_score", "REAL", None),
             ("condition", "TEXT", None),
             ("acknowledged", "INTEGER", "0"),
+            ("ml_prediction", "TEXT", None),
+            ("ml_confidence", "REAL", None),
+            ("risk_level", "INTEGER", None),
         ]:
             try:
                 default_clause = f" DEFAULT {default}" if default is not None else ""
@@ -220,6 +223,28 @@ class Database:
 
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             )
+        """)
+
+        # Depression episodes table (ML-detected high stress periods)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS depression_episodes (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT,
+                peak_risk_level INTEGER,
+                total_readings INTEGER DEFAULT 0,
+                avg_confidence REAL,
+                is_active INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+
+        # Index for fast episode lookups
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_depression_episodes_user
+            ON depression_episodes(user_id, is_active DESC)
         """)
 
         self.conn.commit()
@@ -1132,6 +1157,220 @@ class Database:
             (belief_improvement, emotion_improvement, session_id)
         )
         self.conn.commit()
+
+    # ==================== ML INFERENCE & DEPRESSION TRACKING ====================
+
+    def get_recent_readings_for_ml(self, user_id: str, limit: int = 50) -> list:
+        """
+        Get most recent sensor readings for ML inference.
+        Returns data ordered from OLDEST to NEWEST (required for time-series analysis).
+        """
+        results = self.conn.execute(
+            """SELECT ppg, gsr, acc_x, acc_y, acc_z, recorded_at
+               FROM wearable_data
+               WHERE user_id = ?
+               ORDER BY recorded_at DESC
+               LIMIT ?""",
+            (user_id, limit)
+        ).fetchall()
+
+        # Reverse to get oldest-to-newest order
+        readings = [
+            {
+                "ppg": r[0],
+                "gsr": r[1],
+                "acc_x": r[2],
+                "acc_y": r[3],
+                "acc_z": r[4],
+                "timestamp": r[5]
+            }
+            for r in reversed(results)
+        ]
+
+        return readings
+
+    def update_ml_prediction(self, record_id: str, prediction: str, confidence: float, risk_level: int):
+        """Update a wearable data record with ML prediction results."""
+        self.conn.execute(
+            """UPDATE wearable_data
+               SET ml_prediction = ?, ml_confidence = ?, risk_level = ?
+               WHERE id = ?""",
+            (prediction, confidence, risk_level, record_id)
+        )
+        self.conn.commit()
+
+    def get_active_depression_episode(self, user_id: str) -> dict:
+        """Get the currently active depression episode for a user, if any."""
+        result = self.conn.execute(
+            """SELECT id, user_id, start_time, peak_risk_level, total_readings, avg_confidence
+               FROM depression_episodes
+               WHERE user_id = ? AND is_active = 1
+               ORDER BY start_time DESC LIMIT 1""",
+            (user_id,)
+        ).fetchone()
+
+        if result:
+            return {
+                "id": result[0],
+                "user_id": result[1],
+                "start_time": result[2],
+                "peak_risk_level": result[3],
+                "total_readings": result[4],
+                "avg_confidence": result[5]
+            }
+        return None
+
+    def start_depression_episode(self, user_id: str, risk_level: int, confidence: float) -> str:
+        """Start a new depression episode."""
+        episode_id = str(uuid.uuid4())
+
+        self.conn.execute(
+            """INSERT INTO depression_episodes
+               (id, user_id, start_time, peak_risk_level, total_readings, avg_confidence, is_active)
+               VALUES (?, ?, CURRENT_TIMESTAMP, ?, 1, ?, 1)""",
+            (episode_id, user_id, risk_level, confidence)
+        )
+        self.conn.commit()
+
+        return episode_id
+
+    def update_depression_episode(self, episode_id: str, risk_level: int, confidence: float):
+        """Update an active depression episode with new reading."""
+        # Get current stats
+        result = self.conn.execute(
+            """SELECT total_readings, avg_confidence, peak_risk_level
+               FROM depression_episodes WHERE id = ?""",
+            (episode_id,)
+        ).fetchone()
+
+        if result:
+            total_readings = result[0]
+            avg_confidence = result[1]
+            peak_risk = result[2]
+
+            # Update rolling average confidence
+            new_total = total_readings + 1
+            new_avg_confidence = ((avg_confidence * total_readings) + confidence) / new_total
+
+            # Update peak risk level
+            new_peak_risk = max(peak_risk, risk_level)
+
+            self.conn.execute(
+                """UPDATE depression_episodes
+                   SET total_readings = ?,
+                       avg_confidence = ?,
+                       peak_risk_level = ?
+                   WHERE id = ?""",
+                (new_total, new_avg_confidence, new_peak_risk, episode_id)
+            )
+            self.conn.commit()
+
+    def end_depression_episode(self, episode_id: str):
+        """Mark a depression episode as ended."""
+        self.conn.execute(
+            """UPDATE depression_episodes
+               SET end_time = CURRENT_TIMESTAMP,
+                   is_active = 0
+               WHERE id = ?""",
+            (episode_id,)
+        )
+        self.conn.commit()
+
+    def get_user_depression_stats(self, user_id: str) -> dict:
+        """Get depression episode statistics for a user."""
+        # Total episodes
+        total_result = self.conn.execute(
+            """SELECT COUNT(*) FROM depression_episodes WHERE user_id = ?""",
+            (user_id,)
+        ).fetchone()
+
+        # Active episode
+        active_result = self.conn.execute(
+            """SELECT COUNT(*) FROM depression_episodes
+               WHERE user_id = ? AND is_active = 1""",
+            (user_id,)
+        ).fetchone()
+
+        # Last 7 days episodes
+        recent_result = self.conn.execute(
+            """SELECT COUNT(*) FROM depression_episodes
+               WHERE user_id = ? AND start_time >= datetime('now', '-7 days')""",
+            (user_id,)
+        ).fetchone()
+
+        # Peak risk level in last 7 days
+        peak_result = self.conn.execute(
+            """SELECT MAX(peak_risk_level) FROM depression_episodes
+               WHERE user_id = ? AND start_time >= datetime('now', '-7 days')""",
+            (user_id,)
+        ).fetchone()
+
+        # Latest ML prediction
+        latest_pred = self.conn.execute(
+            """SELECT ml_prediction, ml_confidence, risk_level, recorded_at
+               FROM wearable_data
+               WHERE user_id = ? AND ml_prediction IS NOT NULL
+               ORDER BY recorded_at DESC LIMIT 1""",
+            (user_id,)
+        ).fetchone()
+
+        return {
+            "total_episodes": total_result[0] if total_result else 0,
+            "has_active_episode": (active_result[0] > 0) if active_result else False,
+            "episodes_last_7_days": recent_result[0] if recent_result else 0,
+            "peak_risk_last_7_days": peak_result[0] if (peak_result and peak_result[0]) else 0,
+            "latest_prediction": {
+                "prediction": latest_pred[0],
+                "confidence": latest_pred[1],
+                "risk_level": latest_pred[2],
+                "timestamp": latest_pred[3]
+            } if latest_pred else None
+        }
+
+    def get_all_depression_episodes(self, user_id: str, limit: int = 50) -> list:
+        """Get all depression episodes for a user."""
+        results = self.conn.execute(
+            """SELECT id, start_time, end_time, peak_risk_level, total_readings, avg_confidence, is_active
+               FROM depression_episodes
+               WHERE user_id = ?
+               ORDER BY start_time DESC
+               LIMIT ?""",
+            (user_id, limit)
+        ).fetchall()
+
+        return [
+            {
+                "id": r[0],
+                "start_time": r[1],
+                "end_time": r[2],
+                "peak_risk_level": r[3],
+                "total_readings": r[4],
+                "avg_confidence": r[5],
+                "is_active": bool(r[6])
+            }
+            for r in results
+        ]
+
+    def get_ml_prediction_history(self, user_id: str, limit: int = 100) -> list:
+        """Get history of ML predictions for a user."""
+        results = self.conn.execute(
+            """SELECT ml_prediction, ml_confidence, risk_level, recorded_at
+               FROM wearable_data
+               WHERE user_id = ? AND ml_prediction IS NOT NULL
+               ORDER BY recorded_at DESC
+               LIMIT ?""",
+            (user_id, limit)
+        ).fetchall()
+
+        return [
+            {
+                "prediction": r[0],
+                "confidence": r[1],
+                "risk_level": r[2],
+                "timestamp": r[3]
+            }
+            for r in results
+        ]
 
 
 # Singleton instance

@@ -7,6 +7,8 @@ gunicorn==21.2.0
 numpy<2
 httpx>=0.27.0,<0.28.0
 groq>=0.11.0
+torch>=2.0.0
+scikit-learn>=1.3.0
 
 # Database (Turso)
 libsql-experimental==0.0.47

@@ -143,6 +143,12 @@ def get_patient_detail(user_id):
     # Add wearable summary
     patient['wearable_summary'] = db.get_user_wearable_summary(user_id)
 
+    # Add depression risk statistics (ML-based)
+    patient['depression_stats'] = db.get_user_depression_stats(user_id)
+
+    # Add recent depression episodes
+    patient['recent_episodes'] = db.get_all_depression_episodes(user_id, limit=10)
+
     return jsonify(patient)
 
 
@@ -183,3 +189,23 @@ def get_mood_chart_data(user_id):
     db = get_db()
     data = db.get_user_mood_history(user_id, limit)
     return jsonify({'data': data})
+
+
+@admin_bp.route('/api/charts/ml-predictions/<user_id>')
+@admin_required
+def get_ml_prediction_chart_data(user_id):
+    """Get ML prediction history for charts."""
+    limit = request.args.get('limit', 100, type=int)
+    db = get_db()
+    data = db.get_ml_prediction_history(user_id, limit)
+    return jsonify({'data': data})
+
+
+@admin_bp.route('/api/depression-episodes/<user_id>')
+@admin_required
+def get_user_depression_episodes(user_id):
+    """Get all depression episodes for a user."""
+    limit = request.args.get('limit', 50, type=int)
+    db = get_db()
+    episodes = db.get_all_depression_episodes(user_id, limit)
+    return jsonify({'episodes': episodes, 'count': len(episodes)})

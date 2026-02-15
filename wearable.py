@@ -1,6 +1,7 @@
 """
 Wearable Device Module
 Handles sensor data from wearable devices (PPG, GSR, Accelerometer)
+Includes ML-based depression risk prediction
 """
 
 from flask import Blueprint, request, jsonify
@@ -8,8 +9,98 @@ from auth import token_required
 from database import get_db
 from datetime import datetime
 
+# Import ML inference (will be initialized at startup)
+try:
+    from ml_inference import predict_risk
+    ML_ENABLED = True
+except Exception as e:
+    print(f"⚠️  ML inference not available: {str(e)}")
+    ML_ENABLED = False
+
 wearable_bp = Blueprint('wearable', __name__)
 
+
+# ==================== ML INFERENCE HELPER ====================
+
+def run_ml_inference_and_alert(user_id: str, record_id: str, db):
+    """
+    Run ML inference on recent sensor data and trigger alerts if needed.
+    This runs after each new sensor reading is saved.
+    """
+    if not ML_ENABLED:
+        return
+
+    try:
+        # Get recent readings (need at least 25 for 5 windows of 5 samples)
+        recent_readings = db.get_recent_readings_for_ml(user_id, limit=50)
+
+        if len(recent_readings) < 25:
+            # Not enough data yet
+            return
+
+        # Run ML prediction
+        prediction_result = predict_risk(recent_readings)
+
+        if not prediction_result:
+            return
+
+        prediction = prediction_result["prediction"]
+        confidence = prediction_result["confidence"]
+        risk_level = prediction_result["risk_level"]
+
+        # Update the wearable record with prediction
+        db.update_ml_prediction(record_id, prediction, confidence, risk_level)
+
+        # Handle depression episodes based on risk level
+        if risk_level >= 1:  # MILD_STRESS or HIGH_STRESS
+            # Check if there's an active episode
+            active_episode = db.get_active_depression_episode(user_id)
+
+            if active_episode:
+                # Update existing episode
+                db.update_depression_episode(active_episode["id"], risk_level, confidence)
+            else:
+                # Start new episode
+                db.start_depression_episode(user_id, risk_level, confidence)
+
+            # Create crisis flag for high stress
+            if risk_level == 2:  # HIGH_STRESS
+                # Get user info
+                user = db.get_user_by_id(user_id)
+                if user:
+                    # Create crisis flag for admin monitoring
+                    db.flag_crisis(
+                        user_id=user_id,
+                        user_name=user.get("name", "Unknown"),
+                        user_email=user.get("email", ""),
+                        session_id="wearable_ml_detection",
+                        message_content=f"ML Model detected HIGH STRESS: {prediction} (confidence: {confidence:.2%})",
+                        trigger_word="HIGH_STRESS_ML"
+                    )
+
+                print(f"🚨 HIGH STRESS ALERT for user {user_id}: {prediction} ({confidence:.2%})")
+
+        else:  # NORMAL
+            # Check if we should end an active episode
+            active_episode = db.get_active_depression_episode(user_id)
+
+            if active_episode:
+                # Count consecutive normal readings
+                # End episode if user has been normal for last 5 readings
+                recent_predictions = db.get_ml_prediction_history(user_id, limit=5)
+                if len(recent_predictions) >= 5:
+                    all_normal = all(p["risk_level"] == 0 for p in recent_predictions)
+                    if all_normal:
+                        db.end_depression_episode(active_episode["id"])
+                        print(f"✅ Depression episode ended for user {user_id}")
+
+    except Exception as e:
+        print(f"❌ Error in ML inference: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
+
+# ==================== SENSOR DATA ENDPOINTS ====================
 
 @wearable_bp.route("/api/wearable/data", methods=["POST"])
 @token_required
@@ -61,6 +152,9 @@ def receive_sensor_data():
             acc_z=float(acc_z),
             device_timestamp=device_timestamp
         )
+
+        # Run ML inference and check for depression risk
+        run_ml_inference_and_alert(user["id"], record_id, db)
 
         return jsonify({
             "success": True,
@@ -397,6 +491,9 @@ def receive_device_data():
             device_timestamp=device_timestamp
         )
 
+        # Run ML inference and check for depression risk
+        run_ml_inference_and_alert(user["id"], record_id, db)
+
         return jsonify({
             "success": True,
             "record_id": record_id
@@ -407,6 +504,65 @@ def receive_device_data():
     except Exception as e:
         print(f"Error saving device data: {str(e)}")
         return jsonify({"error": "Failed to save sensor data"}), 500
+
+
+@wearable_bp.route("/api/wearable/ml/status", methods=["GET"])
+@token_required
+def get_ml_status():
+    """
+    Get current ML-based depression risk status for the user.
+    Returns latest prediction and depression episode information.
+    """
+    try:
+        user = request.current_user
+        db = get_db()
+
+        # Get depression statistics
+        stats = db.get_user_depression_stats(user["id"])
+
+        # Get active episode details if any
+        active_episode = db.get_active_depression_episode(user["id"]) if stats.get("has_active_episode") else None
+
+        # Get recent prediction history
+        recent_predictions = db.get_ml_prediction_history(user["id"], limit=10)
+
+        return jsonify({
+            "ml_enabled": ML_ENABLED,
+            "current_status": stats.get("latest_prediction"),
+            "has_active_episode": stats.get("has_active_episode"),
+            "active_episode": active_episode,
+            "statistics": {
+                "total_episodes": stats.get("total_episodes"),
+                "episodes_last_7_days": stats.get("episodes_last_7_days"),
+                "peak_risk_last_7_days": stats.get("peak_risk_last_7_days")
+            },
+            "recent_predictions": recent_predictions
+        })
+
+    except Exception as e:
+        print(f"Error fetching ML status: {str(e)}")
+        return jsonify({"error": "Failed to fetch ML status"}), 500
+
+
+@wearable_bp.route("/api/wearable/ml/episodes", methods=["GET"])
+@token_required
+def get_depression_episodes():
+    """Get all depression episodes for the user."""
+    try:
+        user = request.current_user
+        db = get_db()
+
+        limit = min(int(request.args.get("limit", 50)), 100)
+        episodes = db.get_all_depression_episodes(user["id"], limit=limit)
+
+        return jsonify({
+            "episodes": episodes,
+            "count": len(episodes)
+        })
+
+    except Exception as e:
+        print(f"Error fetching depression episodes: {str(e)}")
+        return jsonify({"error": "Failed to fetch episodes"}), 500
 
 
 @wearable_bp.route("/api/wearable/device/batch", methods=["POST"])

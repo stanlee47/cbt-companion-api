@@ -28,6 +28,18 @@ app.register_blueprint(admin_bp)
 # Initialize components
 groq_client = GroqClient(api_key=os.environ.get("GROQ_API_KEY"))
 
+# Initialize ML model for depression detection
+try:
+    from ml_inference import initialize_model
+    ml_ready = initialize_model()
+    if ml_ready:
+        print("✅ ML Model initialized successfully")
+    else:
+        print("⚠️  ML Model initialization failed - predictions disabled")
+except Exception as e:
+    print(f"⚠️  Could not load ML model: {str(e)}")
+    print("   Wearable predictions will be disabled")
+
 
 @app.route("/", methods=["GET"])
 def home():
