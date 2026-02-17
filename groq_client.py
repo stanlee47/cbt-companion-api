@@ -19,8 +19,9 @@ class GroqClient:
     def __init__(self, api_key: str):
         if not api_key:
             raise ValueError("GROQ_API_KEY is required")
-        self.client = Groq(api_key=api_key)
-        print(f"✅ Groq client initialized with model: {self.MODEL}")
+        # Set timeout to prevent hanging requests (60 seconds max per request)
+        self.client = Groq(api_key=api_key, timeout=60.0)
+        print(f"✅ Groq client initialized with model: {self.MODEL} (timeout: 60s)")
 
     # ==================== AGENT 1: WARM QUESTIONER ====================
 

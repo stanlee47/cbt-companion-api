@@ -12,5 +12,5 @@ COPY . .
 # Expose port
 EXPOSE 7860
 
-# Run the app
-CMD ["gunicorn", "--bind", "0.0.0.0:7860", "app:app"]
+# Run the app with config file
+CMD ["gunicorn", "-c", "gunicorn.conf.py", "app:app"]

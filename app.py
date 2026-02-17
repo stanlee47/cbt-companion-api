@@ -39,6 +39,33 @@ app = Flask(__name__,
             static_folder='static')
 CORS(app)
 
+# Request timeout protection
+from functools import wraps
+import signal
+from contextlib import contextmanager
+
+class TimeoutError(Exception):
+    pass
+
+@contextmanager
+def timeout_context(seconds):
+    """Context manager for request timeout (Unix only)."""
+    def timeout_handler(signum, frame):
+        raise TimeoutError(f"Request exceeded {seconds} second timeout")
+
+    # Only use signal timeout on Unix systems (not Windows)
+    if hasattr(signal, 'SIGALRM'):
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(seconds)
+        try:
+            yield
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+    else:
+        # On Windows, just yield without timeout
+        yield
+
 # Register blueprints
 app.register_blueprint(wearable_bp)
 app.register_blueprint(admin_bp)
@@ -49,17 +76,31 @@ groq_client = GroqClient(api_key=os.environ.get("GROQ_API_KEY"))
 # Initialize patient tracking (adds columns to beck_sessions table)
 init_patient_tracking()
 
-# Initialize ML model for depression detection
-try:
-    from ml_inference import initialize_model
-    ml_ready = initialize_model()
-    if ml_ready:
-        print("✅ ML Model initialized successfully")
-    else:
-        print("⚠️  ML Model initialization failed - predictions disabled")
-except Exception as e:
-    print(f"⚠️  Could not load ML model: {str(e)}")
-    print("   Wearable predictions will be disabled")
+# Initialize ML model for depression detection (LAZY LOADING to save memory)
+# Only load when actually needed, not at startup
+ML_MODEL_LOADED = False
+
+def lazy_load_ml_model():
+    """Lazy load ML model only when needed to save memory."""
+    global ML_MODEL_LOADED
+    if not ML_MODEL_LOADED:
+        try:
+            from ml_inference import initialize_model
+            ml_ready = initialize_model()
+            if ml_ready:
+                print("✅ ML Model initialized successfully")
+                ML_MODEL_LOADED = True
+                return True
+            else:
+                print("⚠️  ML Model initialization failed - predictions disabled")
+                return False
+        except Exception as e:
+            print(f"⚠️  Could not load ML model: {str(e)}")
+            print("   Wearable predictions will be disabled")
+            return False
+    return True
+
+print("ℹ️  ML Model will be lazy-loaded when needed (memory optimization)")
 
 
 @app.route("/", methods=["GET"])
@@ -67,9 +108,36 @@ def home():
     return jsonify({
         "status": "online",
         "app": "CBT Companion",
-        "version": "2.1.0",
+        "version": "2.1.1",
         "features": ["multi-user", "auth", "crisis-detection", "wearable-integration"]
     })
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    """Health check endpoint for monitoring."""
+    import psutil
+    import gc
+
+    try:
+        # Get memory info
+        process = psutil.Process()
+        memory_info = process.memory_info()
+
+        return jsonify({
+            "status": "healthy",
+            "timestamp": datetime.utcnow().isoformat(),
+            "memory_mb": round(memory_info.rss / 1024 / 1024, 2),
+            "memory_percent": round(process.memory_percent(), 2),
+            "cpu_percent": round(process.cpu_percent(interval=0.1), 2),
+            "ml_model_loaded": ML_MODEL_LOADED
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }), 500
 
 
 # ==================== AUTH ROUTES ====================
@@ -372,11 +440,20 @@ def chat():
             "belief_improvement": calculate_improvement(beck_data) if beck_data else None
         })
 
+    except TimeoutError as e:
+        print(f"Timeout in /api/chat: {str(e)}")
+        return jsonify({
+            "error": "Request took too long. Please try again.",
+            "timeout": True
+        }), 504
     except Exception as e:
         print(f"Error in /api/chat: {str(e)}")
         import traceback
         traceback.print_exc()
-        return jsonify({"error": "Something went wrong"}), 500
+        return jsonify({
+            "error": "Something went wrong. Please try again.",
+            "details": str(e) if os.getenv("DEBUG") else None
+        }), 500
 
 
 # ==================== EXERCISE ROUTES ====================
@@ -822,8 +899,12 @@ def handle_full_beck_protocol(current_state: str, user_message: str, session_id:
         metadata["session_complete"] = True
 
     # Save messages to database
-    db.add_message(session_id, user_id, "user", user_message)
-    db.add_message(session_id, user_id, "assistant", response_text)
+    try:
+        db.add_message(session_id, user_id, "user", user_message)
+        db.add_message(session_id, user_id, "assistant", response_text)
+    except Exception as db_error:
+        print(f"Database error saving messages: {str(db_error)}")
+        # Continue anyway - don't fail the whole request
 
     return jsonify({
         "response": response_text,

@@ -18,3 +18,4 @@ PyJWT==2.8.0
 
 # Utils
 python-dotenv==1.0.0
+psutil>=5.9.0
