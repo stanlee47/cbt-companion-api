@@ -65,7 +65,7 @@ def run_ml_inference_and_alert(user_id: str, record_id: str, db):
             if FCM_ENABLED:
                 try:
                     fcm_token = db.get_fcm_token(user_id)
-                    if fcm_token and db.fcm_cooldown_ok(user_id, cooldown_minutes=5):
+                    if fcm_token and db.fcm_cooldown_ok(user_id, cooldown_minutes=3):
                         condition = 'HIGH_STRESS' if risk_level == 2 else 'MILD_STRESS'
                         sent = fcm_send(
                             fcm_token=fcm_token,
