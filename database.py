@@ -41,9 +41,16 @@ class Database:
                 password_hash TEXT NOT NULL,
                 name TEXT NOT NULL,
                 context TEXT DEFAULT 'person',
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                fcm_token TEXT
             )
         """)
+        # Add fcm_token column to existing deployments that lack it
+        try:
+            self.conn.execute("ALTER TABLE users ADD COLUMN fcm_token TEXT")
+            self.conn.commit()
+        except Exception:
+            pass  # Column already exists
         
         # Sessions table
         self.conn.execute("""
@@ -309,8 +316,24 @@ class Database:
             }
         return None
     
+    def save_fcm_token(self, user_id: str, token: str):
+        """Save or update FCM device token for a user."""
+        self.conn.execute(
+            "UPDATE users SET fcm_token = ? WHERE id = ?",
+            (token, user_id)
+        )
+        self.conn.commit()
+
+    def get_fcm_token(self, user_id: str) -> str:
+        """Get the FCM token for a user, or None."""
+        result = self.conn.execute(
+            "SELECT fcm_token FROM users WHERE id = ?",
+            (user_id,)
+        ).fetchone()
+        return result[0] if result else None
+
     # ==================== SESSION OPERATIONS ====================
-    
+
     def create_session(self, user_id: str) -> str:
         """Create a new chat session."""
         session_id = str(uuid.uuid4())

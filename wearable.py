@@ -9,6 +9,13 @@ from auth import token_required
 from database import get_db
 from datetime import datetime
 
+try:
+    from fcm_push import send_stress_alert as fcm_send
+    FCM_ENABLED = True
+except Exception as _fcm_err:
+    print(f"⚠️  FCM not available: {_fcm_err}")
+    FCM_ENABLED = False
+
 # Import ML inference (will be initialized at startup)
 try:
     from ml_inference import predict_risk
@@ -54,6 +61,21 @@ def run_ml_inference_and_alert(user_id: str, record_id: str, db):
 
         # Handle depression episodes based on risk level
         if risk_level >= 1:  # MILD_STRESS or HIGH_STRESS
+            # Send FCM push notification to user's phone
+            if FCM_ENABLED:
+                try:
+                    fcm_token = db.get_fcm_token(user_id)
+                    if fcm_token:
+                        condition = 'HIGH_STRESS' if risk_level == 2 else 'MILD_STRESS'
+                        fcm_send(
+                            fcm_token=fcm_token,
+                            alert_id=record_id,
+                            condition=condition,
+                            dri_score=float(confidence),
+                        )
+                except Exception as fcm_err:
+                    print(f"⚠️  FCM push failed (non-fatal): {fcm_err}")
+
             # Check if there's an active episode
             active_episode = db.get_active_depression_episode(user_id)
 

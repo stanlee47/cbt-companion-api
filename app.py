@@ -189,6 +189,20 @@ def get_me():
     })
 
 
+@app.route("/api/user/fcm-token", methods=["POST"])
+@token_required
+def save_fcm_token():
+    """Store FCM device token for push notifications."""
+    user = request.current_user
+    data = request.json or {}
+    token = data.get('token', '').strip()
+    if not token:
+        return jsonify({"error": "token is required"}), 400
+    db = get_db()
+    db.save_fcm_token(user["id"], token)
+    return jsonify({"success": True})
+
+
 # ==================== SESSION ROUTES ====================
 
 @app.route("/api/session/new", methods=["POST"])
