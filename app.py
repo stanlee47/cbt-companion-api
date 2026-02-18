@@ -213,7 +213,28 @@ def fcm_debug():
     """
     user = request.current_user
     db = get_db()
-    fcm_token = db.get_fcm_token(user["id"])
+    return _fcm_debug_for_user(user["id"], db)
+
+
+@app.route("/api/wearable/device/fcm-debug", methods=["GET"])
+def device_fcm_debug():
+    """
+    Same as /api/user/fcm-debug but authenticated via X-Device-Key header.
+    Allows testing FCM without knowing the account email/password.
+    Query param: ?send_test=1 to send a test notification.
+    """
+    api_key = request.headers.get("X-Device-Key")
+    if not api_key:
+        return jsonify({"error": "X-Device-Key header required"}), 401
+    db = get_db()
+    user = db.get_user_by_device_key(api_key)
+    if not user:
+        return jsonify({"error": "Invalid or revoked device key"}), 401
+    return _fcm_debug_for_user(user["id"], db)
+
+
+def _fcm_debug_for_user(user_id, db):
+    fcm_token = db.get_fcm_token(user_id)
     result = {
         "fcm_backend_enabled": _fcm_enabled,
         "user_has_token": bool(fcm_token),
