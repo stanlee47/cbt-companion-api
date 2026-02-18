@@ -64,7 +64,7 @@ def send_stress_alert(fcm_token: str, alert_id: str, condition: str,
             android=messaging.AndroidConfig(
                 priority='high',
                 notification=messaging.AndroidNotification(
-                    channel_id='stress_alerts_v2',
+                    channel_id='stress_alerts_v3',
                     priority='max',
                     sound='default',
                     default_vibrate_timings=True,
