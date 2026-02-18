@@ -1191,11 +1191,13 @@ class Database:
 
     def update_ml_prediction(self, record_id: str, prediction: str, confidence: float, risk_level: int):
         """Update a wearable data record with ML prediction results."""
+        condition = prediction  # prediction is already "NORMAL", "MILD_STRESS", or "HIGH_STRESS"
         self.conn.execute(
             """UPDATE wearable_data
-               SET ml_prediction = ?, ml_confidence = ?, risk_level = ?
+               SET ml_prediction = ?, ml_confidence = ?, risk_level = ?,
+                   condition = ?, dri_score = ?
                WHERE id = ?""",
-            (prediction, confidence, risk_level, record_id)
+            (prediction, confidence, risk_level, condition, confidence, record_id)
         )
         self.conn.commit()
 

@@ -26,9 +26,10 @@ def run_ml_inference_and_alert(user_id: str, record_id: str, db):
     """
     Run ML inference on recent sensor data and trigger alerts if needed.
     This runs after each new sensor reading is saved.
+    Returns the prediction result dict or None.
     """
     if not ML_ENABLED:
-        return
+        return None
 
     try:
         # Get recent readings (need at least 25 for 5 windows of 5 samples)
@@ -36,13 +37,13 @@ def run_ml_inference_and_alert(user_id: str, record_id: str, db):
 
         if len(recent_readings) < 25:
             # Not enough data yet
-            return
+            return {"status": "waiting", "readings_count": len(recent_readings), "needed": 25}
 
         # Run ML prediction
         prediction_result = predict_risk(recent_readings)
 
         if not prediction_result:
-            return
+            return None
 
         prediction = prediction_result["prediction"]
         confidence = prediction_result["confidence"]
@@ -94,10 +95,13 @@ def run_ml_inference_and_alert(user_id: str, record_id: str, db):
                         db.end_depression_episode(active_episode["id"])
                         print(f"✅ Depression episode ended for user {user_id}")
 
+        return prediction_result
+
     except Exception as e:
         print(f"❌ Error in ML inference: {str(e)}")
         import traceback
         traceback.print_exc()
+        return None
 
 
 # ==================== SENSOR DATA ENDPOINTS ====================
@@ -227,6 +231,19 @@ def receive_batch_data():
 
             except (ValueError, TypeError) as e:
                 errors.append(f"Reading {i}: {str(e)}")
+
+        # Run ML inference after batch save (uses latest 25+ readings)
+        if saved_count > 0:
+            try:
+                last_record_id = db.conn.execute(
+                    """SELECT id FROM wearable_data
+                       WHERE user_id = ? ORDER BY recorded_at DESC LIMIT 1""",
+                    (user["id"],)
+                ).fetchone()
+                if last_record_id:
+                    run_ml_inference_and_alert(user["id"], last_record_id[0], db)
+            except Exception as ml_err:
+                print(f"ML inference after batch failed: {str(ml_err)}")
 
         return jsonify({
             "success": True,
@@ -492,12 +509,16 @@ def receive_device_data():
         )
 
         # Run ML inference and check for depression risk
-        run_ml_inference_and_alert(user["id"], record_id, db)
+        ml_result = run_ml_inference_and_alert(user["id"], record_id, db)
 
-        return jsonify({
+        response_data = {
             "success": True,
             "record_id": record_id
-        })
+        }
+        if ml_result:
+            response_data["ml_prediction"] = ml_result
+
+        return jsonify(response_data)
 
     except ValueError as e:
         return jsonify({"error": f"Invalid data format: {str(e)}"}), 400
@@ -505,6 +526,143 @@ def receive_device_data():
         print(f"Error saving device data: {str(e)}")
         return jsonify({"error": "Failed to save sensor data"}), 500
 
+
+# ==================== ALERT ENDPOINTS ====================
+
+@wearable_bp.route("/api/wearable/alerts/latest", methods=["GET"])
+@token_required
+def get_latest_alert():
+    """
+    Get the latest unacknowledged HIGH_STRESS or MILD_STRESS alert.
+    Used by the Flutter app for polling-based alert detection.
+    """
+    try:
+        user = request.current_user
+        db = get_db()
+
+        # Find the latest unacknowledged stress reading
+        result = db.conn.execute(
+            """SELECT id, risk_level, ml_confidence, ml_prediction, ppg, gsr,
+                      recorded_at, condition
+               FROM wearable_data
+               WHERE user_id = ?
+                 AND risk_level >= 1
+                 AND (acknowledged = 0 OR acknowledged IS NULL)
+               ORDER BY recorded_at DESC
+               LIMIT 1""",
+            (user["id"],)
+        ).fetchone()
+
+        if not result:
+            return jsonify({"has_alert": False, "alert": None})
+
+        alert = {
+            "id": result[0],
+            "dri_score": result[2] if result[2] else 0.0,
+            "condition": result[7] if result[7] else ("HIGH_STRESS" if result[1] == 2 else "MILD_STRESS"),
+            "ppg": result[4],
+            "gsr": result[5],
+            "recorded_at": result[6],
+        }
+
+        return jsonify({"has_alert": True, "alert": alert})
+
+    except Exception as e:
+        print(f"Error fetching latest alert: {str(e)}")
+        return jsonify({"error": "Failed to fetch alert"}), 500
+
+
+@wearable_bp.route("/api/wearable/alerts", methods=["GET"])
+@token_required
+def get_all_alerts():
+    """
+    Get all unacknowledged stress alerts for the user.
+    """
+    try:
+        user = request.current_user
+        db = get_db()
+
+        results = db.conn.execute(
+            """SELECT id, risk_level, ml_confidence, ml_prediction, ppg, gsr,
+                      recorded_at, condition
+               FROM wearable_data
+               WHERE user_id = ?
+                 AND risk_level >= 1
+                 AND (acknowledged = 0 OR acknowledged IS NULL)
+               ORDER BY recorded_at DESC
+               LIMIT 50""",
+            (user["id"],)
+        ).fetchall()
+
+        alerts = []
+        high_count = 0
+        mild_count = 0
+        for r in results:
+            condition = r[7] if r[7] else ("HIGH_STRESS" if r[1] == 2 else "MILD_STRESS")
+            alerts.append({
+                "id": r[0],
+                "dri_score": r[2] if r[2] else 0.0,
+                "condition": condition,
+                "ppg": r[4],
+                "gsr": r[5],
+                "recorded_at": r[6],
+            })
+            if r[1] == 2:
+                high_count += 1
+            elif r[1] == 1:
+                mild_count += 1
+
+        return jsonify({
+            "alerts": alerts,
+            "count": len(alerts),
+            "high_stress_count": high_count,
+            "mild_stress_count": mild_count,
+            "has_critical": high_count > 0,
+        })
+
+    except Exception as e:
+        print(f"Error fetching alerts: {str(e)}")
+        return jsonify({"error": "Failed to fetch alerts"}), 500
+
+
+@wearable_bp.route("/api/wearable/alerts/acknowledge", methods=["POST"])
+@token_required
+def acknowledge_alerts():
+    """
+    Acknowledge stress alerts. If alert_id is provided, acknowledge that specific alert.
+    Otherwise, acknowledge all unacknowledged alerts for the user.
+    """
+    try:
+        user = request.current_user
+        db = get_db()
+
+        data = request.json or {}
+        alert_id = data.get("alert_id")
+
+        if alert_id:
+            db.conn.execute(
+                """UPDATE wearable_data SET acknowledged = 1
+                   WHERE id = ? AND user_id = ?""",
+                (alert_id, user["id"])
+            )
+        else:
+            db.conn.execute(
+                """UPDATE wearable_data SET acknowledged = 1
+                   WHERE user_id = ? AND risk_level >= 1
+                     AND (acknowledged = 0 OR acknowledged IS NULL)""",
+                (user["id"],)
+            )
+
+        db.conn.commit()
+
+        return jsonify({"success": True, "message": "Alerts acknowledged"})
+
+    except Exception as e:
+        print(f"Error acknowledging alerts: {str(e)}")
+        return jsonify({"error": "Failed to acknowledge alerts"}), 500
+
+
+# ==================== ML STATUS ENDPOINTS ====================
 
 @wearable_bp.route("/api/wearable/ml/status", methods=["GET"])
 @token_required
@@ -635,6 +793,19 @@ def receive_device_batch():
 
             except (ValueError, TypeError) as e:
                 errors.append(f"Reading {i}: {str(e)}")
+
+        # Run ML inference after batch save (uses latest 25+ readings)
+        if saved_count > 0:
+            try:
+                last_record_id = db.conn.execute(
+                    """SELECT id FROM wearable_data
+                       WHERE user_id = ? ORDER BY recorded_at DESC LIMIT 1""",
+                    (user["id"],)
+                ).fetchone()
+                if last_record_id:
+                    run_ml_inference_and_alert(user["id"], last_record_id[0], db)
+            except Exception as ml_err:
+                print(f"ML inference after device batch failed: {str(ml_err)}")
 
         return jsonify({
             "success": True,

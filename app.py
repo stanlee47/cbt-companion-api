@@ -745,7 +745,15 @@ def handle_full_beck_protocol(current_state: str, user_message: str, session_id:
 
         # Check for crisis signal
         elif "[CRISIS_FLAG]" in response_text:
-            # Item 9 indicated suicidal thoughts
+            # Item 9 indicated suicidal thoughts - flag for admin monitoring
+            db.flag_crisis(
+                user_id=user_id,
+                user_name=user_name,
+                user_email=request.current_user.get("email", ""),
+                session_id=session_id,
+                message_content="BDI Item 9 (Suicidal Thoughts) scored >= 2",
+                trigger_word="BDI_SUICIDAL_IDEATION"
+            )
             crisis_response = get_crisis_response(user_name)
 
             return jsonify({
