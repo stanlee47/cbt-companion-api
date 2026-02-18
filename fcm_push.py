@@ -43,15 +43,9 @@ def send_stress_alert(fcm_token: str, alert_id: str, condition: str,
         _get_app()
         from firebase_admin import messaging
 
-        is_high = condition == 'HIGH_STRESS'
-        title = 'High Stress Detected' if is_high else 'Mild Stress Detected'
-        body = f'DRI Score: {dri_score:.2f} — Tap to get support'
-
+        # Data-only message (no 'notification' field) so Android delivers it
+        # to the background handler, which shows a full-screen alarm notification.
         message = messaging.Message(
-            notification=messaging.Notification(
-                title=title,
-                body=body,
-            ),
             data={
                 'alert_id': str(alert_id),
                 'condition': condition,
@@ -62,13 +56,7 @@ def send_stress_alert(fcm_token: str, alert_id: str, condition: str,
                 'type': 'stress_alert',
             },
             android=messaging.AndroidConfig(
-                priority='high',
-                notification=messaging.AndroidNotification(
-                    channel_id='stress_alerts_v3',
-                    priority='max',
-                    sound='default',
-                    default_vibrate_timings=True,
-                ),
+                priority='high',   # FCM transport priority — bypasses Doze mode
             ),
             token=fcm_token,
         )
