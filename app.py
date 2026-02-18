@@ -12,7 +12,7 @@ from auth import register_user, login_user, token_required
 from crisis_detector import check_for_crisis, get_crisis_response, get_crisis_resources
 from prompts import NATURAL_ENDINGS
 from exercises import get_exercise_for_group
-from wearable import wearable_bp
+from wearable import wearable_bp, FCM_ENABLED as _fcm_enabled
 from admin import admin_bp
 import os
 import re
@@ -130,7 +130,8 @@ def health():
             "memory_mb": round(memory_info.rss / 1024 / 1024, 2),
             "memory_percent": round(process.memory_percent(), 2),
             "cpu_percent": round(process.cpu_percent(interval=0.1), 2),
-            "ml_model_loaded": ML_MODEL_LOADED
+            "ml_model_loaded": ML_MODEL_LOADED,
+            "fcm_enabled": _fcm_enabled
         })
     except Exception as e:
         return jsonify({
@@ -201,6 +202,39 @@ def save_fcm_token():
     db = get_db()
     db.save_fcm_token(user["id"], token)
     return jsonify({"success": True})
+
+
+@app.route("/api/user/fcm-debug", methods=["GET"])
+@token_required
+def fcm_debug():
+    """
+    Debug endpoint: shows FCM status for current user and optionally sends a test push.
+    Query param: ?send_test=1 to send a test notification.
+    """
+    user = request.current_user
+    db = get_db()
+    fcm_token = db.get_fcm_token(user["id"])
+    result = {
+        "fcm_backend_enabled": _fcm_enabled,
+        "user_has_token": bool(fcm_token),
+        "token_preview": f"...{fcm_token[-12:]}" if fcm_token else None,
+    }
+    if request.args.get("send_test") == "1":
+        if not _fcm_enabled:
+            result["test_push"] = "SKIPPED — firebase-admin not installed on server"
+        elif not fcm_token:
+            result["test_push"] = "SKIPPED — no FCM token stored for this user (login on phone first)"
+        else:
+            from fcm_push import send_stress_alert
+            ok = send_stress_alert(
+                fcm_token=fcm_token,
+                alert_id="test-debug",
+                condition="MILD_STRESS",
+                dri_score=0.75,
+                recorded_at=datetime.utcnow().isoformat(),
+            )
+            result["test_push"] = "SENT ✅" if ok else "FAILED ❌ (check server logs)"
+    return jsonify(result)
 
 
 # ==================== SESSION ROUTES ====================
