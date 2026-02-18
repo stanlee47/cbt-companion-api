@@ -65,14 +65,18 @@ def run_ml_inference_and_alert(user_id: str, record_id: str, db):
             if FCM_ENABLED:
                 try:
                     fcm_token = db.get_fcm_token(user_id)
-                    if fcm_token:
+                    if fcm_token and db.fcm_cooldown_ok(user_id, cooldown_minutes=30):
                         condition = 'HIGH_STRESS' if risk_level == 2 else 'MILD_STRESS'
-                        fcm_send(
+                        sent = fcm_send(
                             fcm_token=fcm_token,
                             alert_id=record_id,
                             condition=condition,
                             dri_score=float(confidence),
                         )
+                        if sent:
+                            db.update_fcm_sent_time(user_id)
+                    elif fcm_token:
+                        print(f"ℹ️  FCM skipped for {user_id} — still in 30-min cooldown")
                 except Exception as fcm_err:
                     print(f"⚠️  FCM push failed (non-fatal): {fcm_err}")
 

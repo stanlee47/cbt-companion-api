@@ -51,6 +51,12 @@ class Database:
             self.conn.commit()
         except Exception:
             pass  # Column already exists
+        # Add last_fcm_sent column for cooldown tracking
+        try:
+            self.conn.execute("ALTER TABLE users ADD COLUMN last_fcm_sent TEXT")
+            self.conn.commit()
+        except Exception:
+            pass  # Column already exists
         
         # Sessions table
         self.conn.execute("""
@@ -331,6 +337,27 @@ class Database:
             (user_id,)
         ).fetchone()
         return result[0] if result else None
+
+    def fcm_cooldown_ok(self, user_id: str, cooldown_minutes: int = 30) -> bool:
+        """Return True if enough time has passed since the last FCM push."""
+        result = self.conn.execute(
+            "SELECT last_fcm_sent FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if not result or not result[0]:
+            return True
+        try:
+            last = datetime.fromisoformat(result[0])
+            return (datetime.utcnow() - last).total_seconds() >= cooldown_minutes * 60
+        except Exception:
+            return True
+
+    def update_fcm_sent_time(self, user_id: str):
+        """Record the current UTC time as the last FCM send for cooldown tracking."""
+        self.conn.execute(
+            "UPDATE users SET last_fcm_sent = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(), user_id)
+        )
+        self.conn.commit()
 
     # ==================== SESSION OPERATIONS ====================
 
