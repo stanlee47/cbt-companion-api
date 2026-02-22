@@ -63,6 +63,13 @@ def run_ml_inference_and_alert(user_id: str, record_id: str, db):
         RISK_EMOJI = {0: "✅ NORMAL", 1: "⚠️  MILD_STRESS", 2: "🚨 HIGH_STRESS"}
         print(f"  → {RISK_EMOJI[risk_level]} | confidence={confidence:.2%} | readings_used={n}")
 
+        # Require minimum confidence before acting on the prediction.
+        # Low-confidence predictions (model unsure) should not trigger alerts or episodes.
+        MIN_CONFIDENCE = 0.55
+        if risk_level >= 1 and confidence < MIN_CONFIDENCE:
+            print(f"[ML] Skipping alert — confidence {confidence:.2%} < {MIN_CONFIDENCE:.0%} threshold")
+            risk_level = 0  # treat as normal for alert/episode logic
+
         # Save prediction to its own table
         db.save_window_prediction(user_id, prediction, confidence, risk_level,
                                   readings_used=n)
@@ -518,6 +525,9 @@ def receive_device_data():
         acc_y = data.get("acc_y")
         acc_z = data.get("acc_z")
         device_timestamp = data.get("timestamp")
+        # On-device DRI score computed by ESP32 after its 5-min personal baseline calibration
+        device_dri_score = data.get("dri_score")
+        device_condition = data.get("condition")
 
         # Validate required fields
         if ppg is None or gsr is None:
@@ -537,8 +547,9 @@ def receive_device_data():
             device_timestamp=device_timestamp
         )
 
+        dri_info = f" | device_dri={float(device_dri_score):.2f} ({device_condition})" if device_dri_score is not None else ""
         print(f"[DATA] user={user['id'][:8]}... | ppg={float(ppg):.3f} gsr={float(gsr):.1f} "
-              f"acc=({float(acc_x):.2f},{float(acc_y):.2f},{float(acc_z):.2f}) | saved={record_id[:8]}...")
+              f"acc=({float(acc_x):.2f},{float(acc_y):.2f},{float(acc_z):.2f}){dri_info} | saved={record_id[:8]}...")
 
         # Run ML inference (results logged to backend console, not returned)
         run_ml_inference_and_alert(user["id"], record_id, db)

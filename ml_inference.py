@@ -157,10 +157,12 @@ def prepare_sensor_data(raw_readings):
     ppg_values = [r['ppg'] for r in raw_readings]
     gsr_values = [r['gsr'] for r in raw_readings]
 
-    # Calculate motion magnitude
+    # Calculate motion magnitude — subtract 9.81 to remove gravity offset,
+    # matching the ESP32 firmware: acc_motion = abs(acc_total - 9.81)
     acc_values = []
     for r in raw_readings:
-        motion = np.sqrt(r['acc_x']**2 + r['acc_y']**2 + r['acc_z']**2)
+        total = np.sqrt(r['acc_x']**2 + r['acc_y']**2 + r['acc_z']**2)
+        motion = abs(total - 9.81)
         acc_values.append(motion)
 
     # Z-normalize using rolling window statistics
@@ -258,8 +260,11 @@ def predict_risk(raw_readings):
                 "message": "Need at least 25 readings for prediction"
             }
 
-        # Normalize features
-        features = simple_standardize(features)
+        # NOTE: simple_standardize is intentionally NOT called here.
+        # Features are already extracted from z-normalized sensor data inside
+        # prepare_sensor_data → z_normalize → extract_features_from_window.
+        # Applying a second normalization pass corrupts the feature distributions
+        # the model was trained on and causes systematic misclassification.
 
         # Convert to tensor
         model = model_singleton.get_model()

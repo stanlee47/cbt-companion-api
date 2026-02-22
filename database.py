@@ -867,6 +867,12 @@ class Database:
                 (r[0],)
             ).fetchone()[0]
 
+            # Check for active ML-detected risk episode
+            active_ep = self.conn.execute(
+                "SELECT COUNT(*) FROM depression_episodes WHERE user_id = ? AND ended_at IS NULL",
+                (r[0],)
+            ).fetchone()[0]
+
             users.append({
                 "id": r[0],
                 "email": r[1],
@@ -877,7 +883,8 @@ class Database:
                 "total_exercises": r[6] or 0,
                 "current_streak": r[7] or 0,
                 "last_session_date": r[8],
-                "unreviewed_alerts": flag_count
+                "unreviewed_alerts": flag_count,
+                "has_active_episode": active_ep > 0,
             })
 
         return users
@@ -1013,13 +1020,26 @@ class Database:
             "SELECT COUNT(*) FROM sessions WHERE completed = 1"
         ).fetchone()[0]
 
+        # Active ML-detected risk episodes
+        active_episodes = self.conn.execute(
+            "SELECT COUNT(*) FROM depression_episodes WHERE ended_at IS NULL"
+        ).fetchone()[0]
+
+        # Wearable readings in last 24 hours
+        wearable_today = self.conn.execute(
+            """SELECT COUNT(*) FROM wearable_data
+               WHERE recorded_at >= datetime('now', '-24 hours')"""
+        ).fetchone()[0]
+
         return {
             "total_users": total_users,
             "sessions_today": sessions_today,
             "unreviewed_alerts": unreviewed_alerts,
             "avg_mood_change": avg_mood_change,
             "total_sessions": total_sessions,
-            "completed_sessions": completed_sessions
+            "completed_sessions": completed_sessions,
+            "active_episodes": active_episodes,
+            "wearable_readings_today": wearable_today,
         }
 
     def get_user_wearable_summary(self, user_id: str) -> dict:
