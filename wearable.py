@@ -39,25 +39,34 @@ def run_ml_inference_and_alert(user_id: str, record_id: str, db):
         return None
 
     try:
-        # Get recent readings (need at least 25 for 5 windows of 5 samples)
+        # Get recent readings — need 30 for a full window
         recent_readings = db.get_recent_readings_for_ml(user_id, limit=50)
+        n = len(recent_readings)
 
-        if len(recent_readings) < 25:
-            # Not enough data yet
-            return {"status": "waiting", "readings_count": len(recent_readings), "needed": 25}
+        print(f"[ML] user={user_id} | readings={n}/30", end="")
+
+        if n < 30:
+            print(f"  → waiting ({30 - n} more needed)")
+            return None
 
         # Run ML prediction
         prediction_result = predict_risk(recent_readings)
 
         if not prediction_result:
+            print("  → predict_risk returned None")
             return None
 
         prediction = prediction_result["prediction"]
         confidence = prediction_result["confidence"]
         risk_level = prediction_result["risk_level"]
 
-        # Update the wearable record with prediction
-        db.update_ml_prediction(record_id, prediction, confidence, risk_level)
+        RISK_EMOJI = {0: "✅ NORMAL", 1: "⚠️  MILD_STRESS", 2: "🚨 HIGH_STRESS"}
+        print(f"  → {RISK_EMOJI[risk_level]} | confidence={confidence:.2%} | readings_used={n}")
+
+        # Save prediction to its own table
+        db.save_window_prediction(user_id, prediction, confidence, risk_level,
+                                  readings_used=n)
+        print(f"[ML] Window prediction saved to db")
 
         # Handle depression episodes based on risk level
         if risk_level >= 1:  # MILD_STRESS or HIGH_STRESS
@@ -75,56 +84,50 @@ def run_ml_inference_and_alert(user_id: str, record_id: str, db):
                         )
                         if sent:
                             db.update_fcm_sent_time(user_id)
+                            print(f"[FCM] Push sent → {condition}")
                     elif fcm_token:
-                        print(f"ℹ️  FCM skipped for {user_id} — still in 30-min cooldown")
+                        print(f"[FCM] Skipped — still in cooldown")
                 except Exception as fcm_err:
-                    print(f"⚠️  FCM push failed (non-fatal): {fcm_err}")
+                    print(f"[FCM] Push failed (non-fatal): {fcm_err}")
 
             # Check if there's an active episode
             active_episode = db.get_active_depression_episode(user_id)
 
             if active_episode:
-                # Update existing episode
                 db.update_depression_episode(active_episode["id"], risk_level, confidence)
+                print(f"[EP]  Updated active episode {active_episode['id'][:8]}...")
             else:
-                # Start new episode
-                db.start_depression_episode(user_id, risk_level, confidence)
+                ep_id = db.start_depression_episode(user_id, risk_level, confidence)
+                print(f"[EP]  New depression episode started → {ep_id[:8]}...")
 
-            # Create crisis flag for high stress
-            if risk_level == 2:  # HIGH_STRESS
-                # Get user info
+            # Crisis flag for high stress
+            if risk_level == 2:
                 user = db.get_user_by_id(user_id)
                 if user:
-                    # Create crisis flag for admin monitoring
                     db.flag_crisis(
                         user_id=user_id,
                         user_name=user.get("name", "Unknown"),
                         user_email=user.get("email", ""),
                         session_id="wearable_ml_detection",
-                        message_content=f"ML Model detected HIGH STRESS: {prediction} (confidence: {confidence:.2%})",
+                        message_content=f"ML detected HIGH STRESS: {prediction} ({confidence:.2%})",
                         trigger_word="HIGH_STRESS_ML"
                     )
-
-                print(f"🚨 HIGH STRESS ALERT for user {user_id}: {prediction} ({confidence:.2%})")
+                    print(f"[CRISIS] Flag raised for {user.get('name')} ({user.get('email')})")
 
         else:  # NORMAL
-            # Check if we should end an active episode
             active_episode = db.get_active_depression_episode(user_id)
-
             if active_episode:
-                # Count consecutive normal readings
-                # End episode if user has been normal for last 5 readings
                 recent_predictions = db.get_ml_prediction_history(user_id, limit=5)
                 if len(recent_predictions) >= 5:
                     all_normal = all(p["risk_level"] == 0 for p in recent_predictions)
                     if all_normal:
                         db.end_depression_episode(active_episode["id"])
-                        print(f"✅ Depression episode ended for user {user_id}")
+                        print(f"[EP]  Episode ended — 5 consecutive NORMAL readings")
 
         return prediction_result
 
     except Exception as e:
-        print(f"❌ Error in ML inference: {str(e)}")
+        print(f"[ML] ❌ Error: {str(e)}")
         import traceback
         traceback.print_exc()
         return None
@@ -534,17 +537,13 @@ def receive_device_data():
             device_timestamp=device_timestamp
         )
 
-        # Run ML inference and check for depression risk
-        ml_result = run_ml_inference_and_alert(user["id"], record_id, db)
+        print(f"[DATA] user={user['id'][:8]}... | ppg={float(ppg):.3f} gsr={float(gsr):.1f} "
+              f"acc=({float(acc_x):.2f},{float(acc_y):.2f},{float(acc_z):.2f}) | saved={record_id[:8]}...")
 
-        response_data = {
-            "success": True,
-            "record_id": record_id
-        }
-        if ml_result:
-            response_data["ml_prediction"] = ml_result
+        # Run ML inference (results logged to backend console, not returned)
+        run_ml_inference_and_alert(user["id"], record_id, db)
 
-        return jsonify(response_data)
+        return jsonify({"success": True, "record_id": record_id})
 
     except ValueError as e:
         return jsonify({"error": f"Invalid data format: {str(e)}"}), 400

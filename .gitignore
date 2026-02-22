@@ -1,44 +1,80 @@
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+
+# C extensions
 *.so
+
+# Distribution / packaging
 .Python
-*.egg-info/
-dist/
 build/
-*.egg
+dist/
+*.egg-info/
+.eggs/
 
-# Virtual Environment
-venv/
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Environments
+.env
+.venv
 env/
+venv/
 ENV/
+env.bak/
+venv.bak/
 
-# IDE
-.vscode/
+# IDEs
 .idea/
+.vscode/
 *.swp
 *.swo
 
-# Environment variables
-.env
-.env.local
-
-# OS
+# macOS
 .DS_Store
-Thumbs.db
-
-# Testing
-.pytest_cache/
-.coverage
-
-# Database
-*.db
-*.sqlite
-*.sqlite3
+.AppleDouble
+.LSOverride
 
 # Logs
 *.log
 
-# Ignore all markdown files
-*.md
+# Docker
+*.log
+*.pid
+*.seed
+*.pid.lock
+
+# Static files
+static/css/
+static/js/
+static/templates/
+
+# Data files
+data/*.csv
+
+# Models
+models/
+
+# Local settings
+.claude/settings.local.json

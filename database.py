@@ -238,6 +238,25 @@ class Database:
             )
         """)
 
+        # ML window predictions — one row per inference call (every 25 readings)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS ml_window_predictions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                prediction TEXT NOT NULL,
+                risk_level INTEGER NOT NULL,
+                confidence REAL NOT NULL,
+                readings_used INTEGER DEFAULT 25,
+                predicted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ml_window_user_time
+            ON ml_window_predictions(user_id, predicted_at DESC)
+        """)
+
         # Depression episodes table (ML-detected high stress periods)
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS depression_episodes (
@@ -1422,6 +1441,47 @@ class Database:
                 "timestamp": r[3]
             }
             for r in results
+        ]
+
+
+    # ==================== ML WINDOW PREDICTION OPERATIONS ====================
+
+    def save_window_prediction(self, user_id: str, prediction: str,
+                               confidence: float, risk_level: int,
+                               readings_used: int = 25) -> str:
+        """Save one ML inference result (covers a window of readings)."""
+        record_id = str(uuid.uuid4())
+        self.conn.execute(
+            """INSERT INTO ml_window_predictions
+               (id, user_id, prediction, risk_level, confidence, readings_used)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (record_id, user_id, prediction, risk_level,
+             round(confidence, 4), readings_used)
+        )
+        self.conn.commit()
+        return record_id
+
+    def get_window_predictions(self, user_id: str, limit: int = 200) -> list:
+        """Get ML window prediction history for a user (newest first)."""
+        results = self.conn.execute(
+            """SELECT id, prediction, risk_level, confidence, readings_used, predicted_at
+               FROM ml_window_predictions
+               WHERE user_id = ?
+               ORDER BY predicted_at DESC
+               LIMIT ?""",
+            (user_id, limit)
+        ).fetchall()
+
+        return [
+            {
+                "id": r[0],
+                "prediction": r[1],
+                "risk_level": r[2],
+                "confidence": r[3],
+                "readings_used": r[4],
+                "predicted_at": r[5]
+            }
+            for r in reversed(results)  # chronological for charting
         ]
 
 

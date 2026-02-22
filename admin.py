@@ -201,6 +201,16 @@ def get_ml_prediction_chart_data(user_id):
     return jsonify({'data': data})
 
 
+@admin_bp.route('/api/charts/window-predictions/<user_id>')
+@admin_required
+def get_window_prediction_chart_data(user_id):
+    """Get ML window prediction history for charting."""
+    limit = request.args.get('limit', 200, type=int)
+    db = get_db()
+    data = db.get_window_predictions(user_id, limit)
+    return jsonify({'data': data})
+
+
 @admin_bp.route('/api/depression-episodes/<user_id>')
 @admin_required
 def get_user_depression_episodes(user_id):
