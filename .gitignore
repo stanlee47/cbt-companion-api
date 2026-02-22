@@ -78,3 +78,7 @@ models/
 
 # Local settings
 .claude/settings.local.json
+
+
+
+*.pptx
