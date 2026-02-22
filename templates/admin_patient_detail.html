@@ -419,10 +419,10 @@
 
                 // Risk badge in header
                 const depStats = patientData.depression_stats || {};
-                const activeEp = patientData.recent_episodes?.find(e => !e.ended_at);
+                const activeEp = patientData.recent_episodes?.find(e => e.is_active);
                 const badge = document.getElementById('risk-badge');
                 if (activeEp) {
-                    const peakRisk = activeEp.peak_risk_level ?? activeEp.risk_level ?? 1;
+                    const peakRisk = activeEp.peak_risk_level ?? 1;
                     if (peakRisk >= 2) {
                         badge.textContent = '⚠ HIGH STRESS';
                         badge.className = 'px-2 py-0.5 text-xs font-semibold rounded-full bg-red-100 text-red-700';
@@ -777,11 +777,11 @@
                 const data = resp.data || [];
 
                 // Show active episode banner
-                const activeEp = patientData.recent_episodes?.find(e => !e.ended_at);
-                if (activeEp) {
-                    const startedAt = AdminPanel.formatTimeAgo(activeEp.started_at);
-                    const riskLabel = activeEp.peak_risk_level >= 2 ? 'High Stress' : 'Mild Stress';
-                    const confPct = activeEp.peak_confidence ? (activeEp.peak_confidence * 100).toFixed(0) + '%' : 'N/A';
+                const activeEp2 = patientData.recent_episodes?.find(e => e.is_active);
+                if (activeEp2) {
+                    const startedAt = AdminPanel.formatTimeAgo(activeEp2.start_time);
+                    const riskLabel = activeEp2.peak_risk_level >= 2 ? 'High Stress' : 'Mild Stress';
+                    const confPct = activeEp2.avg_confidence ? (activeEp2.avg_confidence * 100).toFixed(0) + '%' : 'N/A';
                     document.getElementById('episode-detail').textContent =
                         `Started ${startedAt} · Peak: ${riskLabel} (${confPct} confidence)`;
                     document.getElementById('active-episode-banner').classList.remove('hidden');

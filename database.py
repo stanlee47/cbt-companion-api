@@ -869,7 +869,7 @@ class Database:
 
             # Check for active ML-detected risk episode
             active_ep = self.conn.execute(
-                "SELECT COUNT(*) FROM depression_episodes WHERE user_id = ? AND ended_at IS NULL",
+                "SELECT COUNT(*) FROM depression_episodes WHERE user_id = ? AND is_active = 1",
                 (r[0],)
             ).fetchone()[0]
 
@@ -1022,7 +1022,7 @@ class Database:
 
         # Active ML-detected risk episodes
         active_episodes = self.conn.execute(
-            "SELECT COUNT(*) FROM depression_episodes WHERE ended_at IS NULL"
+            "SELECT COUNT(*) FROM depression_episodes WHERE is_active = 1"
         ).fetchone()[0]
 
         # Wearable readings in last 24 hours
