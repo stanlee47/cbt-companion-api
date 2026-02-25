@@ -39,14 +39,14 @@ def run_ml_inference_and_alert(user_id: str, record_id: str, db):
         return None
 
     try:
-        # Get recent readings — need 30 for a full window
+        # Get recent readings — need 18 for a full window
         recent_readings = db.get_recent_readings_for_ml(user_id, limit=50)
         n = len(recent_readings)
 
-        print(f"[ML] user={user_id} | readings={n}/30", end="")
+        print(f"[ML] user={user_id} | readings={n}/18", end="")
 
-        if n < 30:
-            print(f"  → waiting ({30 - n} more needed)")
+        if n < 18:
+            print(f"  → waiting ({18 - n} more needed)")
             return None
 
         # Run ML prediction

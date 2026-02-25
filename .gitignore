@@ -73,7 +73,7 @@ static/templates/
 # Data files
 data/*.csv
 
-# Models
+# Models — uploaded directly to HuggingFace via huggingface_hub, not git
 models/
 
 # Local settings

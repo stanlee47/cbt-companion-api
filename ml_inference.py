@@ -1,38 +1,52 @@
 """
 ML Inference Module
-Uses Multi-Scale TCN model to predict depression risk from wearable sensor data
+Uses Multi-Scale TCN Autoencoder to detect depression risk from wearable sensor data.
+Anomaly detection via reconstruction error — no labels needed during inference.
 """
 
+import warnings
 import numpy as np
 import torch
 import torch.nn as nn
 from pathlib import Path
 
 # ===============================
-# MULTI-SCALE TCN MODEL
+# MULTI-SCALE TCN AUTOENCODER
 # ===============================
-class MultiScaleTCN(nn.Module):
-    def __init__(self, input_size=7, num_classes=3):
+class MultiScaleTCN_AE(nn.Module):
+    def __init__(self, input_size=7):
         super().__init__()
 
         self.branch1 = nn.Conv1d(input_size, 32, kernel_size=3, padding=1)
         self.branch2 = nn.Conv1d(input_size, 32, kernel_size=5, padding=2)
         self.branch3 = nn.Conv1d(input_size, 32, kernel_size=7, padding=3)
 
-        self.relu = nn.ReLU()
-        self.pool = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Linear(96, num_classes)
+        self.relu   = nn.LeakyReLU(0.1)
+        self.merge  = nn.Conv1d(96, 64, kernel_size=1)
+        self.expand = nn.Conv1d(64, 96, kernel_size=1)
+
+        self.dec1 = nn.Conv1d(96, input_size, kernel_size=3, padding=1)
+        self.dec2 = nn.Conv1d(96, input_size, kernel_size=5, padding=2)
+        self.dec3 = nn.Conv1d(96, input_size, kernel_size=7, padding=3)
 
     def forward(self, x):
-        x = x.permute(0, 2, 1)
+        # x: (batch, time, features) → permute for Conv1d
+        x = x.permute(0, 2, 1)                        # (batch, features, time)
 
         b1 = self.relu(self.branch1(x))
         b2 = self.relu(self.branch2(x))
         b3 = self.relu(self.branch3(x))
 
-        x = torch.cat([b1, b2, b3], dim=1)
-        x = self.pool(x).squeeze(-1)
-        return self.fc(x)
+        x      = torch.cat([b1, b2, b3], dim=1)       # (batch, 96, time)
+        latent = self.relu(self.merge(x))              # (batch, 64, time)
+        x      = self.relu(self.expand(latent))        # (batch, 96, time)
+
+        d1 = self.dec1(x)
+        d2 = self.dec2(x)
+        d3 = self.dec3(x)
+
+        recon = (d1 + d2 + d3) / 3.0                  # (batch, features, time)
+        return recon.permute(0, 2, 1)                  # (batch, time, features)
 
 
 # ===============================
@@ -40,8 +54,9 @@ class MultiScaleTCN(nn.Module):
 # ===============================
 class ModelSingleton:
     _instance = None
-    _model = None
-    _device = None
+    _model    = None
+    _scaler   = None
+    _device   = None
 
     def __new__(cls):
         if cls._instance is None:
@@ -49,36 +64,47 @@ class ModelSingleton:
         return cls._instance
 
     def load_model(self):
-        """Load the trained TCN model"""
         if self._model is not None:
             return self._model
 
         try:
-            # Determine device
+            import joblib
+
             self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-            # Initialize model
-            self._model = MultiScaleTCN(input_size=7, num_classes=3)
-
-            # Load weights
-            model_path = Path(__file__).parent / "models" / "multiscale_tcn.pth"
-            state_dict = torch.load(model_path, map_location=self._device)
+            # Load autoencoder weights
+            model_path  = Path(__file__).parent / "models" / "ms_tcn_ae_model.pth.zip"
+            self._model = MultiScaleTCN_AE(input_size=7)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                state_dict = torch.load(model_path, map_location=self._device,
+                                        weights_only=True)
             self._model.load_state_dict(state_dict)
-
             self._model.to(self._device)
             self._model.eval()
 
-            print(f"✅ TCN Model loaded successfully on {self._device}")
+            # Load StandardScaler
+            scaler_path  = Path(__file__).parent / "models" / "scaler.pkl"
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                self._scaler = joblib.load(scaler_path)
+
+            print(f"[ML] TCN-AE Model loaded successfully on {self._device}")
             return self._model
 
         except Exception as e:
-            print(f"❌ Error loading TCN model: {str(e)}")
+            print(f"[ML] Error loading model: {str(e)}")
             raise
 
     def get_model(self):
         if self._model is None:
-            return self.load_model()
+            self.load_model()
         return self._model
+
+    def get_scaler(self):
+        if self._scaler is None:
+            self.load_model()
+        return self._scaler
 
     def get_device(self):
         if self._device is None:
@@ -86,7 +112,7 @@ class ModelSingleton:
         return self._device
 
 
-# Global model instance
+# Global singleton
 model_singleton = ModelSingleton()
 
 
@@ -94,209 +120,152 @@ model_singleton = ModelSingleton()
 # FEATURE EXTRACTION
 # ===============================
 
-def z_normalize(values):
-    """Z-normalize a sequence of values"""
-    values = np.array(values)
-    mean = np.mean(values)
-    std = np.std(values)
-
-    # Avoid division by zero
-    if std < 1e-6:
-        return np.zeros_like(values)
-
-    return (values - mean) / std
-
-
-def extract_features_from_window(window_data):
+def extract_features_from_window(ppg_w, gsr_w, acc_w):
     """
-    Extract 7 features from a 5-sample window
+    Extract 7 features from a window of raw (non-normalized) sensor samples.
 
-    Args:
-        window_data: dict with keys 'z_gsr', 'z_ppg', 'z_acc' (each is list of 5 values)
-
-    Returns:
-        list of 7 features: [mean_gsr, std_gsr, slope_gsr, mean_ppg, std_ppg, mean_motion, motion_ratio]
+    Features (same order the scaler was trained on):
+      0  mean_gsr
+      1  std_gsr
+      2  slope_gsr
+      3  mean_ppg
+      4  std_ppg
+      5  mean_motion
+      6  motion_ratio
     """
-    z_gsr = np.array(window_data['z_gsr'])
-    z_ppg = np.array(window_data['z_ppg'])
-    z_acc = np.array(window_data['z_acc'])
+    ppg_w = np.array(ppg_w, dtype=float)
+    gsr_w = np.array(gsr_w, dtype=float)
+    acc_w = np.array(acc_w, dtype=float)
 
-    # GSR features
-    mean_gsr = np.mean(z_gsr)
-    std_gsr = np.std(z_gsr)
-    slope_gsr = np.polyfit(range(len(z_gsr)), z_gsr, 1)[0] if len(z_gsr) > 1 else 0.0
+    mean_gsr   = np.mean(gsr_w)
+    std_gsr    = np.std(gsr_w)
+    slope_gsr  = np.polyfit(range(len(gsr_w)), gsr_w, 1)[0] if len(gsr_w) > 1 else 0.0
 
-    # PPG features
-    mean_ppg = np.mean(z_ppg)
-    std_ppg = np.std(z_ppg)
+    mean_ppg   = np.mean(ppg_w)
+    std_ppg    = np.std(ppg_w)
 
-    # Motion features
-    mean_motion = np.mean(z_acc)
-    motion_ratio = np.mean(np.abs(z_acc) > 0.2)  # Threshold from training
+    mean_motion  = np.mean(acc_w)
+    motion_ratio = float(np.mean(np.abs(acc_w) > 0.2))
 
     return [mean_gsr, std_gsr, slope_gsr, mean_ppg, std_ppg, mean_motion, motion_ratio]
 
 
 def prepare_sensor_data(raw_readings):
     """
-    Prepare raw sensor readings for model inference
+    Prepare raw sensor readings for autoencoder inference.
 
     Args:
-        raw_readings: List of dicts, each containing:
-            {ppg, gsr, acc_x, acc_y, acc_z, timestamp}
-            Ordered from oldest to newest
+        raw_readings: list of dicts with keys ppg, gsr, acc_x, acc_y, acc_z
+                      ordered oldest → newest (minimum 18)
 
     Returns:
-        numpy array of shape (1, 5, 7) ready for model input
-        or None if insufficient data
+        numpy array shape (1, 5, 7) scaled and ready for model, or None
     """
-    if len(raw_readings) < 25:  # Need at least 5 windows of 5 samples
+    if len(raw_readings) < 18:
         return None
 
-    # Extract raw values
-    ppg_values = [r['ppg'] for r in raw_readings]
-    gsr_values = [r['gsr'] for r in raw_readings]
+    ppg_vals = [r['ppg']   for r in raw_readings]
+    gsr_vals = [r['gsr']   for r in raw_readings]
 
-    # Calculate motion magnitude — subtract 9.81 to remove gravity offset,
-    # matching the ESP32 firmware: acc_motion = abs(acc_total - 9.81)
-    acc_values = []
+    # Motion magnitude with gravity removed (matches ESP32 firmware)
+    acc_vals = []
     for r in raw_readings:
-        total = np.sqrt(r['acc_x']**2 + r['acc_y']**2 + r['acc_z']**2)
+        total  = np.sqrt(r['acc_x']**2 + r['acc_y']**2 + r['acc_z']**2)
         motion = abs(total - 9.81)
-        acc_values.append(motion)
+        acc_vals.append(motion)
 
-    # Z-normalize using rolling window statistics
-    z_ppg = z_normalize(ppg_values)
-    z_gsr = z_normalize(gsr_values)
-    z_acc = z_normalize(acc_values)
-
-    # Create 5-sample windows
+    # 5 overlapping windows of 5 samples (stride 3 → fits 18 readings)
     WINDOW_SIZE = 5
-    windows = []
-
-    # Use last 25 samples to create 5 non-overlapping windows
-    start_idx = len(raw_readings) - 25
+    STRIDE      = 3
+    start_idx   = len(raw_readings) - 18
+    windows     = []
 
     for i in range(5):
-        window_start = start_idx + (i * WINDOW_SIZE)
-        window_end = window_start + WINDOW_SIZE
+        ws = start_idx + i * STRIDE
+        we = ws + WINDOW_SIZE
+        feat = extract_features_from_window(
+            ppg_vals[ws:we], gsr_vals[ws:we], acc_vals[ws:we]
+        )
+        windows.append(feat)
 
-        window_data = {
-            'z_gsr': z_gsr[window_start:window_end],
-            'z_ppg': z_ppg[window_start:window_end],
-            'z_acc': z_acc[window_start:window_end]
-        }
+    # shape (5, 7)
+    feature_seq = np.array(windows, dtype=np.float32)
 
-        features = extract_features_from_window(window_data)
-        windows.append(features)
+    # Scale using the fitted StandardScaler
+    scaler = model_singleton.get_scaler()
+    feature_seq = scaler.transform(feature_seq).astype(np.float32)
 
-    # Convert to numpy array: shape (5, 7)
-    feature_sequence = np.array(windows)
-
-    # Add batch dimension: shape (1, 5, 7)
-    feature_sequence = np.expand_dims(feature_sequence, axis=0)
-
-    return feature_sequence
+    # Add batch dimension → (1, 5, 7)
+    return np.expand_dims(feature_seq, axis=0)
 
 
-def simple_standardize(features):
-    """
-    Simple feature normalization (since we don't have original StandardScaler params)
-    Uses robust scaling to handle outliers
-    """
-    features = features.copy()
-
-    # Robust scaling using median and IQR
-    for i in range(features.shape[-1]):
-        feature_col = features[0, :, i]
-        median = np.median(feature_col)
-        q75 = np.percentile(feature_col, 75)
-        q25 = np.percentile(feature_col, 25)
-        iqr = q75 - q25
-
-        if iqr > 1e-6:
-            features[0, :, i] = (feature_col - median) / iqr
-        else:
-            features[0, :, i] = 0
-
-    return features
+# ===============================
+# RECONSTRUCTION ERROR THRESHOLD
+# ===============================
+THRESHOLD = 0.85
 
 
 # ===============================
 # PREDICTION
 # ===============================
 
-RISK_LABELS = {
-    0: "NORMAL",
-    1: "MILD_STRESS",
-    2: "HIGH_STRESS"
-}
-
-
 def predict_risk(raw_readings):
     """
-    Predict depression risk from raw sensor readings
+    Predict depression risk using autoencoder reconstruction error.
 
     Args:
-        raw_readings: List of recent sensor readings (minimum 25)
+        raw_readings: list of recent sensor reading dicts (min 18)
 
     Returns:
-        dict with:
-            - prediction: "NORMAL", "MILD_STRESS", or "HIGH_STRESS"
-            - risk_level: 0, 1, or 2
-            - confidence: float (0-1)
-            - message: human-readable message
-        or None if insufficient data
+        dict with prediction, risk_level, confidence, message  — or None on error
     """
     try:
-        # Prepare data
         features = prepare_sensor_data(raw_readings)
 
         if features is None:
             return {
-                "prediction": "INSUFFICIENT_DATA",
-                "risk_level": -1,
-                "confidence": 0.0,
-                "message": "Need at least 25 readings for prediction"
+                "prediction":  "INSUFFICIENT_DATA",
+                "risk_level":  -1,
+                "confidence":  0.0,
+                "message":     "Need at least 18 readings for prediction"
             }
 
-        # NOTE: simple_standardize is intentionally NOT called here.
-        # Features are already extracted from z-normalized sensor data inside
-        # prepare_sensor_data → z_normalize → extract_features_from_window.
-        # Applying a second normalization pass corrupts the feature distributions
-        # the model was trained on and causes systematic misclassification.
-
-        # Convert to tensor
-        model = model_singleton.get_model()
+        model  = model_singleton.get_model()
         device = model_singleton.get_device()
 
         x = torch.tensor(features, dtype=torch.float32).to(device)
 
-        # Inference
         with torch.no_grad():
-            output = model(x)
-            probabilities = torch.softmax(output, dim=1)
-            predicted_class = torch.argmax(probabilities, dim=1).item()
-            confidence = probabilities[0, predicted_class].item()
+            recon = model(x)
+            error = torch.mean((recon - x) ** 2).item()
 
-        prediction_label = RISK_LABELS[predicted_class]
+        high_risk  = error > THRESHOLD
+        risk_level = 2 if high_risk else 0
+        prediction = "HIGH_RISK" if high_risk else "NORMAL"
 
-        # Create response
+        # Confidence: how far from the threshold (clamped 0-1)
+        if high_risk:
+            confidence = min(1.0, error / (2 * THRESHOLD))
+        else:
+            confidence = min(1.0, 1.0 - error / THRESHOLD)
+        confidence = max(0.0, round(confidence, 3))
+
         messages = {
             0: "User appears to be in normal mental state",
-            1: "Mild stress detected - monitoring recommended",
-            2: "High stress/depression risk detected - intervention needed"
+            2: "Elevated stress/depression risk detected - monitoring recommended"
         }
 
+        print(f"[ML] recon_error={error:.4f} threshold={THRESHOLD} -> {prediction} ({confidence:.0%})")
+
         return {
-            "prediction": prediction_label,
-            "risk_level": predicted_class,
-            "confidence": round(confidence, 3),
-            "message": messages[predicted_class]
+            "prediction":  prediction,
+            "risk_level":  risk_level,
+            "confidence":  confidence,
+            "message":     messages[risk_level]
         }
 
     except Exception as e:
-        print(f"❌ Error during ML prediction: {str(e)}")
+        print(f"[ML] Error during inference: {str(e)}")
         import traceback
         traceback.print_exc()
         return None
@@ -307,10 +276,10 @@ def predict_risk(raw_readings):
 # ===============================
 
 def initialize_model():
-    """Initialize the model at startup"""
+    """Load model and scaler at startup."""
     try:
         model_singleton.load_model()
         return True
     except Exception as e:
-        print(f"⚠️  ML model initialization failed: {str(e)}")
+        print(f"[ML] Model initialization failed: {str(e)}")
         return False
