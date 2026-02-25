@@ -63,6 +63,30 @@ class ModelSingleton:
             cls._instance = super().__new__(cls)
         return cls._instance
 
+    def _ensure_files(self, models_dir):
+        """Download model files from HuggingFace Space if missing."""
+        needed = {
+            "ms_tcn_ae_model.pth.zip": "models/ms_tcn_ae_model.pth.zip",
+            "scaler.pkl":               "models/scaler.pkl",
+        }
+        missing = {k: v for k, v in needed.items()
+                   if not (models_dir / k).exists()}
+        if not missing:
+            return
+
+        from huggingface_hub import hf_hub_download
+        models_dir.mkdir(parents=True, exist_ok=True)
+        for local_name, hf_path in missing.items():
+            print(f"[ML] Downloading {hf_path} from HuggingFace Space...")
+            hf_hub_download(
+                repo_id="santa47/cbt-companion-api",
+                filename=hf_path,
+                repo_type="space",
+                local_dir=str(models_dir),
+                local_dir_use_symlinks=False,
+            )
+            print(f"[ML] {local_name} downloaded.")
+
     def load_model(self):
         if self._model is not None:
             return self._model
@@ -72,8 +96,11 @@ class ModelSingleton:
 
             self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+            models_dir = Path(__file__).parent / "models"
+            self._ensure_files(models_dir)
+
             # Load autoencoder weights
-            model_path  = Path(__file__).parent / "models" / "ms_tcn_ae_model.pth.zip"
+            model_path  = models_dir / "ms_tcn_ae_model.pth.zip"
             self._model = MultiScaleTCN_AE(input_size=7)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -84,7 +111,7 @@ class ModelSingleton:
             self._model.eval()
 
             # Load StandardScaler
-            scaler_path  = Path(__file__).parent / "models" / "scaler.pkl"
+            scaler_path  = models_dir / "scaler.pkl"
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 self._scaler = joblib.load(scaler_path)
