@@ -64,10 +64,10 @@ class ModelSingleton:
         return cls._instance
 
     def _ensure_files(self, models_dir):
-        """Download model files from HuggingFace Space if missing."""
+        """Download model files from HuggingFace model repo if missing."""
         needed = {
-            "ms_tcn_ae_model.pth.zip": "models/ms_tcn_ae_model.pth.zip",
-            "scaler.pkl":               "models/scaler.pkl",
+            "ms_tcn_ae_model.pth.zip": "ms_tcn_ae_model.pth",
+            "scaler.pkl":               "scaler.pkl",
         }
         missing = {k: v for k, v in needed.items()
                    if not (models_dir / k).exists()}
@@ -76,16 +76,21 @@ class ModelSingleton:
 
         from huggingface_hub import hf_hub_download
         models_dir.mkdir(parents=True, exist_ok=True)
-        for local_name, hf_path in missing.items():
-            print(f"[ML] Downloading {hf_path} from HuggingFace Space...")
-            hf_hub_download(
-                repo_id="santa47/cbt-companion-api",
-                filename=hf_path,
-                repo_type="space",
+        for local_name, hf_filename in missing.items():
+            print(f"[ML] Downloading {hf_filename} from santa47/cbt-tcn-ae ...")
+            downloaded = hf_hub_download(
+                repo_id="santa47/cbt-tcn-ae",
+                filename=hf_filename,
+                repo_type="model",
                 local_dir=str(models_dir),
                 local_dir_use_symlinks=False,
             )
-            print(f"[ML] {local_name} downloaded.")
+            # Rename if hf saved it under the hf_filename, not our local_name
+            dest = models_dir / local_name
+            src  = models_dir / hf_filename
+            if src.exists() and not dest.exists():
+                src.rename(dest)
+            print(f"[ML] {local_name} ready.")
 
     def load_model(self):
         if self._model is not None:
