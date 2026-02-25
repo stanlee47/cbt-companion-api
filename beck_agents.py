@@ -154,33 +154,34 @@ def bridge_agent(groq_client, user_message: str, conversation_history: list, use
     Returns:
         Agent response
     """
+    # If no previous session data, complete silently — no visible response
+    if "--- PREVIOUS SESSION ---" not in patient_context:
+        return "[BRIDGE_COMPLETE]"
+
     system_prompt = f"""{patient_context}
-You are Aria, a warm CBT therapist bridging from the previous session to today's session.
+You are Aria, a warm CBT therapist.
 
-YOUR TASK:
-1. Briefly reference what you worked on last time (check context above)
-2. Ask: "How have things been since we last talked?"
-3. If they mention anything from the previous session: "Was there anything from last time you wanted to revisit?"
+The patient has returned for a new session. You have their previous session history above — use it as
+silent background awareness only. Do NOT mention "last session", "last time", "previous session",
+or anything that tells the patient you are referencing history.
 
-RULES:
-- Keep it SHORT (2-3 sentences max per message)
-- Be warm and genuine
-- If NO previous session data in context, say [BRIDGE_COMPLETE] immediately
-- After 2-3 exchanges, say [BRIDGE_COMPLETE]
-- Use {user_name}'s name occasionally
-- Don't turn this into a therapy session yet - just checking in"""
+Simply respond warmly and naturally to what they just said. You may gently ask how they have been
+doing if it fits naturally, but do not reference any specific past content unless the patient
+brings it up first.
+
+Always end your response with [BRIDGE_COMPLETE] on a new line (this is invisible to the patient)."""
 
     history_text = "\n".join([
         f"{'Aria' if msg.get('role') == 'assistant' else user_name}: {msg.get('content', '')}"
-        for msg in conversation_history[-6:]
+        for msg in conversation_history[-4:]
     ])
 
-    user_prompt = f"""CONVERSATION:
+    user_prompt = f"""CONVERSATION SO FAR:
 {history_text}
 
 {user_name}: {user_message}
 
-Bridge to today's session."""
+Respond naturally."""
 
     return call_groq(groq_client, MAIN_MODEL, system_prompt, user_prompt, temperature=0.7)
 
@@ -188,35 +189,9 @@ Bridge to today's session."""
 def homework_review_agent(groq_client, user_message: str, conversation_history: list, user_name: str, patient_context: str = "") -> str:
     """Reviews homework from previous session."""
 
-    system_prompt = f"""{patient_context}
-You are Aria, a warm CBT therapist reviewing homework from the previous session.
-
-Check the context above for the previous action plan/homework.
-
-YOUR TASK:
-- If completed: Ask what happened and what they learned. Connect to the belief being tested.
-- If not done: "That's completely okay. What got in the way?" - NO blame, NO guilt
-- If partial: Celebrate what WAS done, process learnings
-
-RULES:
-- Be WARM - homework non-completion is DATA, not failure
-- Keep exchanges brief (2-3 total)
-- When review done, say [HOMEWORK_REVIEW_COMPLETE]
-- If NO homework in context, say [HOMEWORK_REVIEW_COMPLETE] immediately"""
-
-    history_text = "\n".join([
-        f"{'Aria' if msg.get('role') == 'assistant' else user_name}: {msg.get('content', '')}"
-        for msg in conversation_history[-6:]
-    ])
-
-    user_prompt = f"""CONVERSATION:
-{history_text}
-
-{user_name}: {user_message}
-
-Review homework."""
-
-    return call_groq(groq_client, MAIN_MODEL, system_prompt, user_prompt, temperature=0.7)
+    # Complete silently — previous action plan is already in patient_context
+    # and will be available to all subsequent agents in the session.
+    return "[HOMEWORK_REVIEW_COMPLETE]"
 
 
 def agenda_setting_agent(groq_client, user_message: str, conversation_history: list, user_name: str, patient_context: str = "") -> str:

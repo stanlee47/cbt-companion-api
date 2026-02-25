@@ -286,9 +286,8 @@ def new_session():
     if is_returning:
         db.create_beck_session(session_id)
         db.update_beck_state(session_id, "BRIDGE", full_protocol_state="BRIDGE")
-        welcome_message = f"Welcome back, {user['name']}! How have you been since we last spoke?"
-    else:
-        welcome_message = f"Hey {user['name']}! What's on your mind today?"
+
+    welcome_message = f"Hey {user['name']}! What's on your mind today?"
 
     return jsonify({
         "session_id": session_id,
@@ -873,6 +872,12 @@ def handle_full_beck_protocol(current_state: str, user_message: str, session_id:
             next_state = get_next_state_full_protocol(current_state, beck_session, patient_profile)
             db.update_beck_state(session_id, next_state, full_protocol_state=next_state)
             response_text = re.sub(r'\[BRIDGE_COMPLETE\]', '', response_text).strip()
+            # Silent completion — re-process user message in next state
+            if not response_text:
+                return handle_full_beck_protocol(
+                    next_state, user_message, session_id, user_id, user_name,
+                    conversation_history, db
+                )
 
     elif current_state == "HOMEWORK_REVIEW":
         response_text = homework_review_agent(groq_client, user_message, conversation_history, user_name, context)
@@ -881,6 +886,12 @@ def handle_full_beck_protocol(current_state: str, user_message: str, session_id:
             db.update_beck_state(session_id, next_state, full_protocol_state=next_state,
                                homework_reviewed=1, homework_completion_notes=user_message)
             response_text = re.sub(r'\[HOMEWORK_REVIEW_COMPLETE\]', '', response_text).strip()
+            # Silent completion — re-process user message in next state
+            if not response_text:
+                return handle_full_beck_protocol(
+                    next_state, user_message, session_id, user_id, user_name,
+                    conversation_history, db
+                )
 
     elif current_state == "AGENDA_SETTING":
         response_text = agenda_setting_agent(groq_client, user_message, conversation_history, user_name, context)
