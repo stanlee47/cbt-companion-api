@@ -266,17 +266,29 @@ def new_session():
     """Start a new chat session."""
     user = request.current_user
     db = get_db()
-    
+
     session_id = db.create_session(user["id"])
-    
+
     # Set initial mood if provided
     data = request.json or {}
     if "mood" in data:
         db.update_session(session_id, mood_start=data["mood"])
-    
+
+    # For returning users, set up BRIDGE state so prev-session follow-up fires
+    # on their first message (bridge agent checks context and skips if nothing to bridge)
+    user_stats = db.get_user_stats(user["id"])
+    is_returning = user_stats.get("total_sessions", 0) > 0
+
+    if is_returning:
+        db.create_beck_session(session_id)
+        db.update_beck_state(session_id, "BRIDGE", full_protocol_state="BRIDGE")
+        welcome_message = f"Welcome back, {user['name']}! How have you been since we last spoke?"
+    else:
+        welcome_message = f"Hey {user['name']}! What's on your mind today?"
+
     return jsonify({
         "session_id": session_id,
-        "message": f"Hey {user['name']}! 👋 What's on your mind today?",
+        "message": welcome_message,
         "user_name": user["name"]
     })
 

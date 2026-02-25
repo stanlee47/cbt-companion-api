@@ -1170,7 +1170,7 @@ class Database:
                       q2_alternative, q3_worst, q3_best, q3_realistic, q4_effect, q5_friend,
                       q6_action, adaptive_thought, new_thought_belief, final_belief_rating,
                       final_emotion_intensity, action_plan, started_at, completed_at,
-                      belief_improvement, emotion_improvement
+                      belief_improvement, emotion_improvement, full_protocol_state
                FROM beck_sessions WHERE session_id = ?""",
             (session_id,)
         ).fetchone()
@@ -1200,7 +1200,8 @@ class Database:
                 "started_at": result[20],
                 "completed_at": result[21],
                 "belief_improvement": result[22],
-                "emotion_improvement": result[23]
+                "emotion_improvement": result[23],
+                "full_protocol_state": result[24]
             }
         return None
 
