@@ -717,8 +717,8 @@ def get_ml_status():
         # Get active episode details if any
         active_episode = db.get_active_depression_episode(user["id"]) if stats.get("has_active_episode") else None
 
-        # Get recent prediction history
-        recent_predictions = db.get_ml_prediction_history(user["id"], limit=10)
+        # Get recent prediction history from ml_window_predictions table
+        recent_predictions = db.get_window_predictions(user["id"], limit=10)
 
         return jsonify({
             "ml_enabled": ML_ENABLED,
