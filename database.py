@@ -831,12 +831,19 @@ class Database:
 
     def revoke_device_key(self, key_id: str, user_id: str) -> bool:
         """Revoke a device API key."""
-        result = self.conn.execute(
+        # Pre-check existence — libsql rowcount is unreliable for UPDATE
+        exists = self.conn.execute(
+            "SELECT id FROM device_keys WHERE id = ? AND user_id = ?",
+            (key_id, user_id)
+        ).fetchone()
+        if not exists:
+            return False
+        self.conn.execute(
             "UPDATE device_keys SET is_active = 0 WHERE id = ? AND user_id = ?",
             (key_id, user_id)
         )
         self.conn.commit()
-        return result.rowcount > 0
+        return True
 
     def delete_device_key(self, key_id: str, user_id: str) -> bool:
         """Permanently delete a device API key."""

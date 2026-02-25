@@ -275,9 +275,13 @@ def new_session():
         db.update_session(session_id, mood_start=data["mood"])
 
     # For returning users, set up BRIDGE state so prev-session follow-up fires
-    # on their first message (bridge agent checks context and skips if nothing to bridge)
-    user_stats = db.get_user_stats(user["id"])
-    is_returning = user_stats.get("total_sessions", 0) > 0
+    # on their first message (bridge agent checks context and skips if nothing to bridge).
+    # Use direct session count — user_stats.total_sessions is never incremented in normal flow.
+    prior_count = db.conn.execute(
+        "SELECT COUNT(*) FROM sessions WHERE user_id = ? AND id != ?",
+        (user["id"], session_id)
+    ).fetchone()[0]
+    is_returning = prior_count > 0
 
     if is_returning:
         db.create_beck_session(session_id)
@@ -411,6 +415,7 @@ def chat():
             else:
                 # Distortion detected - START BECK PROTOCOL
                 db.create_beck_session(session_id)
+                db.update_session(session_id, locked_group=classification["group"])
                 db.update_beck_state(session_id, "VALIDATE",
                                     original_thought=user_message)
                 beck_data = db.get_beck_session(session_id)
@@ -497,6 +502,7 @@ def chat():
                 else:
                     # Existing cognitive flow complete
                     db.complete_beck_session(session_id)
+                    db.update_session(session_id, completed=1)
 
                     # === HOOK: Transition to post-session states ===
                     patient_profile = get_patient_profile(user["id"])
@@ -968,8 +974,9 @@ def handle_full_beck_protocol(current_state: str, user_message: str, session_id:
             db.update_beck_state(session_id, next_state, full_protocol_state=next_state,
                                patient_feedback=user_message, session_closed_at=datetime.utcnow().isoformat())
 
-            # Increment session count
+            # Increment session count and mark session complete
             increment_session_count(user_id)
+            db.update_session(session_id, completed=1)
 
             response_text = re.sub(r'\[FEEDBACK_COMPLETE\]', '', response_text).strip()
 
