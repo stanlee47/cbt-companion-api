@@ -82,3 +82,10 @@ models/
 
 
 *.pptx
+
+# Internal/dev-only markdown docs
+CLAUDE.md
+DEPLOY_NOW.md
+HF_OPTIMIZATION_FIXES.md
+INTEGRATION_INSTRUCTIONS.md
+NEXT_STEPS.md
