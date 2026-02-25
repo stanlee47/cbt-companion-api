@@ -363,8 +363,10 @@ def chat():
         beck_data_check = db.get_beck_session(session_id)
         if beck_data_check and beck_data_check.get('full_protocol_state'):
             full_state = beck_data_check['full_protocol_state']
-            # If in a new protocol state, handle it with full protocol
-            if is_new_protocol_state(full_state):
+            beck_state = beck_data_check.get('beck_state')
+            # Only route to full protocol when beck_state matches full_protocol_state,
+            # meaning the session was intentionally set up for it (not just the SQL default).
+            if is_new_protocol_state(full_state) and beck_state == full_state:
                 return handle_full_beck_protocol(
                     full_state, user_message, session_id,
                     user["id"], user["name"], conversation_history, db
